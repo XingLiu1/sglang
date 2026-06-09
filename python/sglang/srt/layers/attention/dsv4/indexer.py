@@ -118,6 +118,17 @@ def fp8_paged_mqa_logits_torch(
     return scores
 
 
+try:
+    from opforge.adapter.sglang.dsv4_preshuffle_logits import (
+        fp8_paged_mqa_logits_preshuffle_decorator,
+    )
+except ImportError:
+
+    def fp8_paged_mqa_logits_preshuffle_decorator(fn):
+        return fn
+
+
+@fp8_paged_mqa_logits_preshuffle_decorator
 def _aiter_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kvcache_fp8: torch.Tensor,

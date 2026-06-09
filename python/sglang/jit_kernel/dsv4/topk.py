@@ -41,7 +41,17 @@ def _jit_topk_v2_module():
         ],
     )
 
+try:
+    from opforge.adapter.sglang.dsv4_topk import (
+        deepseek_v4_topk_transform_decorator,
+    )
+except ImportError:
 
+    def deepseek_v4_topk_transform_decorator(fn):
+        return fn
+
+
+@deepseek_v4_topk_transform_decorator
 def topk_transform_512(
     scores: torch.Tensor,
     seq_lens: torch.Tensor,
