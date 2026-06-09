@@ -222,6 +222,17 @@ if _use_aiter:
         from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
 
+########### opforge mHC ###########
+try:
+    from opforge import is_opforge_enabled as _opf_enabled
+
+    _has_opforge = True
+except ImportError:
+    _has_opforge = False
+    _opf_enabled = lambda: False
+########### end opforge ###########
+
+
 def _fused_rmsnorm_fp8_quant(hidden_states, weight, eps):
     x_quant, x_bf16, _, _ = fused_rms_fp8_group_quant(
         hidden_states,
@@ -1443,6 +1454,22 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
             return y, post.squeeze(-1), comb, norm is not None
 
+        if _has_opforge and _opf_enabled():
+            from opforge.interface.dsv4 import mhc_pre
+
+            post, comb, y = mhc_pre(
+                residual=x,
+                fn=hc_fn,
+                hc_scale=hc_scale,
+                hc_base=hc_base,
+                rms_eps=self.rms_norm_eps,
+                hc_pre_eps=self.hc_eps,
+                hc_sinkhorn_eps=self.hc_eps,
+                hc_post_mult_value=_MHC_POST_MULT_VALUE,
+                sinkhorn_repeat=self.hc_sinkhorn_iters,
+            )
+            return y, post.squeeze(-1), comb, False
+
         if _is_hip and envs.SGLANG_OPT_USE_AITER_MHC_PRE.get():
             from aiter.ops.mhc import mhc_pre
 
@@ -1518,6 +1545,13 @@ class DeepseekV4DecoderLayer(nn.Module):
             from sglang.kernels.ops.layernorm.mhc import mhc_post
 
             return mhc_post(x, residual, post, comb)
+
+        elif _has_opforge and _opf_enabled():
+            from opforge.interface.dsv4 import mhc_post
+
+            result = torch.empty_like(residual)
+            mhc_post(result, x, residual, post, comb)
+            return result
 
         elif _is_hip and envs.SGLANG_OPT_USE_AITER_MHC_POST.get():
             from aiter.ops.mhc import mhc_post
