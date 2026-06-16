@@ -42,7 +42,7 @@ def _jit_topk_v2_module():
     )
 
 try:
-    from opforge.adapter.sglang.dsv4_topk import (
+    from tacops.adapter.sglang.dsv4_topk import (
         deepseek_v4_topk_transform_decorator,
     )
 except ImportError:

@@ -119,7 +119,7 @@ def fp8_paged_mqa_logits_torch(
 
 
 try:
-    from opforge.adapter.sglang.dsv4_preshuffle_logits import (
+    from tacops.adapter.sglang.dsv4_preshuffle_logits import (
         fp8_paged_mqa_logits_preshuffle_decorator,
     )
 except ImportError:

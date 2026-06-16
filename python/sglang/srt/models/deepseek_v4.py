@@ -222,15 +222,14 @@ if _use_aiter:
         from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
 
-########### opforge mHC ###########
+########### tacops mHC ###########
 try:
-    from opforge import is_opforge_enabled as _opf_enabled
+    from tacops import is_tacops_enabled
 
-    _has_opforge = True
+    _use_tacops = is_tacops_enabled()
 except ImportError:
-    _has_opforge = False
-    _opf_enabled = lambda: False
-########### end opforge ###########
+    _use_tacops = False
+########### end tacops ###########
 
 
 def _fused_rmsnorm_fp8_quant(hidden_states, weight, eps):
@@ -1454,8 +1453,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
             return y, post.squeeze(-1), comb, norm is not None
 
-        if _has_opforge and _opf_enabled():
-            from opforge.interface.dsv4 import mhc_pre
+        if _use_tacops:
+            from tacops.interface.dsv4 import mhc_pre
 
             post, comb, y = mhc_pre(
                 residual=x,
@@ -1546,8 +1545,8 @@ class DeepseekV4DecoderLayer(nn.Module):
 
             return mhc_post(x, residual, post, comb)
 
-        elif _has_opforge and _opf_enabled():
-            from opforge.interface.dsv4 import mhc_post
+        elif _use_tacops:
+            from tacops.interface.dsv4 import mhc_post
 
             result = torch.empty_like(residual)
             mhc_post(result, x, residual, post, comb)
