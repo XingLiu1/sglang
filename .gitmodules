@@ -1,0 +1,3 @@
+[submodule "3rdparty/tacops"]
+	path = 3rdparty/tacops
+	url = git@git.woa.com:taco/tacops.git
