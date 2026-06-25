@@ -995,6 +995,41 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
 
+########### tacops aiter adapter ###########
+# DSv4-Pro fp4 experts fused MoE — TACOps FlyDSL W4A8/W4A16 backend.
+#
+# These decorators intercept Fp8MoEMethod.process_weights_after_loading / apply
+# for fp4-expert MoE layers (is_fp4_expert=True) on AMD gfx950, replacing the
+# native aiter.fused_moe path with the FlyDSL kernel from TACOps.
+#
+# Activation env vars:
+#   TACOps:   TACO_ENABLE_OPS=1    TACO_SGLANG_ENABLE_MOE=1
+#
+# DSV4_AB_COMPARE=1  — diagnostic mode: run both FlyDSL & aiter on the same
+#                       dispatch input, log cosine/MAE; keep aiter output.
+# DSV4_AB_LAYERS=N   — apply A/B compare to only the first N MoE layers
+#                       (default 2; each kept layer ~1.6 GiB/card).
+#
+# Without TACOps installed, the decorators are identity (no-op) and
+# execution falls through to the native aiter path.  Graceful fallback is also
+# in place: if the FlyDSL kernel fails at runtime (e.g. EP / tensor-parallel
+# edge cases), the layer falls back to native aiter.
+try:
+    from tacops.adapter.sglang import (
+        fp8_fused_moe_aiter_process_weights,
+        fp8_fused_moe_aiter_apply,
+    )
+except ImportError:
+
+    def fp8_fused_moe_aiter_process_weights(fn):
+        return fn
+
+    def fp8_fused_moe_aiter_apply(fn):
+        return fn
+
+########### tacops aiter adapter ###########
+
+
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -1888,6 +1923,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             align_mxfp8_moe_weights_for_flashinfer_trtllm(layer)
 
+    @fp8_fused_moe_aiter_process_weights
     def process_weights_after_loading(self, layer: Module) -> None:
         if _is_hip and _use_hip_int4:
             self.process_weights_hip_int4(layer)
@@ -2018,6 +2054,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
                 align_fp8_moe_weights_for_flashinfer_trtllm(layer)
 
+        # Tell the EP (mori a2a) dispatcher the activation/weight dtype so it
+        # dispatches fp4-packed activations (not bf16). For fp4 experts the
+        # view(fp4_weight_dtype) above already turned w13_weight into float4,
+        # so reading .dtype here yields float4 -> fp4 dispatch.
+        #
+        # NOTE (TACOps takeover): @fp8_fused_moe_aiter_process_weights
+        # returns EARLY for fp4-expert layers and SKIPS this line, so the adapter
+        # replicates set_quant_config itself. Because takeover also skips the
+        # view(fp4_weight_dtype) above, layer.w13_weight is still packed int8 at
+        # that point -> the adapter must pass torch.float4_e2m1fn_x2 EXPLICITLY
+        # (reading .dtype there would feed int8 -> mori falls back to bf16
+        # dispatch and the FP4-direct path is lost). See dsv4_fused_moe_aiter.py.
         if hasattr(layer, "dispatcher"):
             layer.dispatcher.set_quant_config({"weight_dtype": layer.w13_weight.dtype})
 
@@ -2146,6 +2194,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_shape=self.weight_block_size,
         )
 
+    @fp8_fused_moe_aiter_apply
     def apply(
         self,
         layer: torch.nn.Module,
@@ -2474,8 +2523,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             expert_mask=layer.dispatcher.expert_mask_gpu if _use_aiter else None,
             swiglu_limit=self.moe_runner_config.swiglu_limit or 0.0,
-            hidden_pad=getattr(layer, "hidden_pad", 0),
-            intermediate_pad=getattr(layer, "intermediate_pad", 0),
         )
 
 
