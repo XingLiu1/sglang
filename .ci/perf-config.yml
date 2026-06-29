@@ -18,7 +18,7 @@
 regression_threshold_pct: "30"
 
 prefill_args: "--min-input-length-k 50 --max-input-length-k 100 --max-input-length-step-k 25 --chunk-size-k 2 --prefix-cache --dp-size 8"
-decode_args:  "--max-input-length-k 190 --max-batch-size 128 --dp-size 8"
+decode_args:  "--max-input-length-k 190 --max-batch-size 96 --dp-size 8 --max-batch-size-step 32 "
 
 src_prefill_serve_args: "--trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 256 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer"
 src_decode_serve_args:  "--trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-num-draft-tokens 4 --speculative-eagle-topk 1 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 1024 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer"

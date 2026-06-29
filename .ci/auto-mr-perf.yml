@@ -1,0 +1,1417 @@
+version: v3.0
+name: auto-mr-perf
+
+on:
+  manual:
+    name: 手动触发
+    can-skip-step: true
+  repo-name: taco/sglang
+  type: git
+  mr:
+    name: MR触发
+    action:
+    - open
+    - reopen
+    - push-update
+    block-mr: true
+    skip-wip: true
+
+
+variables:
+  source_branch:
+    value: main
+    props:
+      type: git-ref
+      repo-id: Rg29k
+  target_branch:
+    value: main
+    props:
+      type: git-ref
+      repo-id: Rg29k
+  docker_image:
+    value: rocm/tencent-private:rocm7.2.4-93-torch2.9.1-aiter-g46e6c92-sgl-gc062201-20260603
+  remote_host:
+    value: mi355x-node-1
+    props:
+      type: selector
+      options:
+      - id: mi355x-node-1
+        label: mi355x-node-1
+      - id: mi355x-node-10
+        label: mi355x-node-10
+      - id: mi355x-node-11
+        label: mi355x-node-11
+      required: true
+  remote_user:
+    value: root
+  ssh_config:
+    value: /data/home/yuliangylli/.ssh/config
+  model_path:
+    value: /data/models/DeepSeek-V4-Pro
+  serve_port:
+    value: "30001"
+  gpu_wait_timeout_seconds:
+    value: "3600"
+  gpu_idle_vram_mib_threshold:
+    value: "1024"
+  serve_ready_timeout_seconds:
+    value: "1800"
+  log_dir_host:
+    value: /data/ci_logs
+  workspace_dir_host:
+    value: /data/ci_workspace
+  prefill_args:
+    value: --min-input-length-k 50 --max-input-length-k 100 --max-input-length-step-k 25 --chunk-size-k 2 --prefix-cache --dp-size 8
+  decode_args:
+    value: --max-input-length-k 190 --max-batch-size 96 --dp-size 8 --max-batch-size-step 32
+  src_prefill_serve_args:
+    value: --trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 256 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer
+  src_decode_serve_args:
+    value: --trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-num-draft-tokens 4 --speculative-eagle-topk 1 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 1024 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer
+  tgt_prefill_serve_args:
+    value: --trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 256 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer
+  tgt_decode_serve_args:
+    value: --trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-num-draft-tokens 4 --speculative-eagle-topk 1 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 1024 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer
+  src_prefill_serve_envs:
+    value: TACO_ENABLE_OPS=1 SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0
+  src_decode_serve_envs:
+    value: TACO_ENABLE_OPS=1 SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0
+  tgt_prefill_serve_envs:
+    value: TACO_ENABLE_OPS=1 SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0
+  tgt_decode_serve_envs:
+    value: TACO_ENABLE_OPS=1 SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0
+  regression_threshold_pct:
+    value: "30"
+  cache_dir_build:
+    value: /data/ci_cache/auto-mr-perf
+  force_rerun_target:
+    value: "false"
+    props:
+      type: boolean
+  resolved_source_branch:
+    value: ""
+    allow-modify-at-startup: false
+  resolved_target_branch:
+    value: ""
+    allow-modify-at-startup: false
+  resolved_target_commit:
+    value: ""
+    allow-modify-at-startup: false
+  resolved_target_tacops_commit:
+    value: ""
+    allow-modify-at-startup: false
+  decode_source_kv_k:
+    value: ""
+    allow-modify-at-startup: false
+  decode_target_kv_k:
+    value: ""
+    allow-modify-at-startup: false
+  prefill_target_cache_hit:
+    value: "false"
+    allow-modify-at-startup: false
+  prefill_target_cache_dir:
+    value: ""
+    allow-modify-at-startup: false
+  decode_target_cache_hit:
+    value: "false"
+    allow-modify-at-startup: false
+  decode_target_cache_dir:
+    value: ""
+    allow-modify-at-startup: false
+stages:
+- name: checkout
+  label:
+  - Build
+  jobs:
+    job_checkout:
+      name: checkout & ship code
+      runs-on:
+        self-hosted: true
+        node-name: BUILD_poddrrvm_21.214.65.125
+        agent-selector:
+        - linux
+      steps:
+      - name: resolve source/target branches
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -ex
+            # MR webhook exports BK_CI_HOOK_SOURCE_BRANCH / BK_CI_HOOK_TARGET_BRANCH
+            # (verified via build #33's webhookInfo dump). Manual triggers leave
+            # them empty; fall back to the user-set variables.
+            if [ -n "${BK_CI_HOOK_SOURCE_BRANCH:-}" ]; then
+              src="${BK_CI_HOOK_SOURCE_BRANCH}"
+              echo "MR trigger: source = $src (from webhook)"
+            else
+              src="${{variables.source_branch}}"
+              echo "manual trigger: source = $src"
+            fi
+            if [ -n "${BK_CI_HOOK_TARGET_BRANCH:-}" ]; then
+              tgt="${BK_CI_HOOK_TARGET_BRANCH}"
+              echo "MR trigger: target = $tgt (from webhook)"
+            else
+              tgt="${{variables.target_branch}}"
+              echo "manual trigger: target = $tgt"
+            fi
+            echo "::set-variable name=resolved_source_branch::$src"
+            echo "::set-variable name=resolved_target_branch::$tgt"
+        retry-times: 3
+      - checkout:
+          repo-id: Rg29k
+        name: Checkout repo (fetches all branches incl. source & target)
+        with:
+          refName: "${{variables.resolved_source_branch}}"
+          localPath: "sglang-repo-${{ci.build_id}}"
+        retry-times: 3
+      - name: load perf-config from source branch
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            if [ -z "${BK_CI_HOOK_SOURCE_BRANCH:-}" ]; then
+              echo "manual trigger detected; skipping perf-config.yml load"
+              echo "(UI-supplied variable values are kept verbatim)"
+              exit 0
+            fi
+            REPO_DIR="${{ci.workspace}}/sglang-repo-${{ci.build_id}}"
+            SRC_BRANCH="${{variables.resolved_source_branch}}"
+
+            cd "$REPO_DIR"
+            if ! git show "origin/$SRC_BRANCH:.ci/perf-config.yml" > /tmp/perf-config.yml 2>/dev/null; then
+              echo "no .ci/perf-config.yml on $SRC_BRANCH; using yaml defaults"
+              exit 0
+            fi
+            echo "=== loaded perf-config.yml from $SRC_BRANCH ==="
+            cat /tmp/perf-config.yml
+            echo "=== /perf-config.yml ==="
+
+            for k in src_prefill_serve_args src_decode_serve_args \
+                     tgt_prefill_serve_args tgt_decode_serve_args \
+                     src_prefill_serve_envs src_decode_serve_envs \
+                     tgt_prefill_serve_envs tgt_decode_serve_envs \
+                     prefill_args decode_args regression_threshold_pct; do
+              v=$(python3 -c "import yaml; d = yaml.safe_load(open('/tmp/perf-config.yml')) or {}; print(d.get('$k', '') or '')")
+              if [ -n "$v" ]; then
+                echo "override $k from perf-config.yml"
+                echo "::set-variable name=$k::$v"
+              else
+                echo "$k not set in perf-config.yml; using yaml default"
+              fi
+            done
+        retry-times: 3
+      - name: ship both branches (with tacops submodule) to mi355x
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -ex
+            REMOTE="${{variables.remote_host}}"
+            SSH_CONFIG="${{variables.ssh_config}}"
+            SSH="ssh -F $SSH_CONFIG -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            SCP="scp -F $SSH_CONFIG -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+
+            BASE="${{variables.workspace_dir_host}}/${{ci.build_id}}"
+            SRC_BRANCH="${{variables.resolved_source_branch}}"
+            TGT_BRANCH="${{variables.resolved_target_branch}}"
+            REPO_DIR="${{ci.workspace}}/sglang-repo-${{ci.build_id}}"
+
+            cd "${{ci.workspace}}"
+            $SSH "$REMOTE" "rm -rf '$BASE' && mkdir -p '$BASE'"
+
+            tgt_commit=$(git -C "$REPO_DIR" rev-parse "origin/$TGT_BRANCH")
+            echo "target sglang commit: $tgt_commit"
+            echo "::set-variable name=resolved_target_commit::$tgt_commit"
+
+            STAGE="${{ci.workspace}}/ship-stage-${{ci.build_id}}"
+            rm -rf "$STAGE" && mkdir -p "$STAGE"
+
+            pack_and_ship() {
+              local kind="$1"
+              local tarball="$STAGE/sglang-${kind}-${{ci.build_id}}.tar.gz"
+              local remote_dir="$BASE/sglang-$kind"
+              # --transform rewrites the leading dir so the remote always sees
+              # `sglang-<kind>/...` regardless of the build node's path layout.
+              tar --transform "s,^[^/]*,sglang-$kind," -czf "$tarball" \
+                  -C "$(dirname "$REPO_DIR")" "$(basename "$REPO_DIR")"
+              ls -lh "$tarball"
+              $SCP "$tarball" "$REMOTE:/tmp/sglang-${kind}-${{ci.build_id}}.tar.gz"
+              $SSH "$REMOTE" bash -s <<REMOTE_EOF
+            set -ex
+            mkdir -p "$BASE"
+            tar -xzf "/tmp/sglang-${kind}-${{ci.build_id}}.tar.gz" -C "$BASE"
+            rm -f "/tmp/sglang-${kind}-${{ci.build_id}}.tar.gz"
+            ls "$remote_dir/python/sglang" >/dev/null
+            ls "$remote_dir/3rdparty/tacops" >/dev/null
+            REMOTE_EOF
+              rm -f "$tarball"
+            }
+
+            # source: bk-ci checkout already left $REPO_DIR on source with the
+            # tacops submodule populated. Be explicit about the ref anyway, so
+            # we don't depend on whether bk-ci leaves us on $SRC_BRANCH or its
+            # internal `devops-virtual-branch`.
+            git -C "$REPO_DIR" checkout --detach "origin/$SRC_BRANCH"
+            src_tacops_commit=$(git -C "$REPO_DIR/3rdparty/tacops" rev-parse HEAD)
+            echo "source tacops commit: $src_tacops_commit"
+            pack_and_ship source
+
+            # target: switching the main repo's HEAD does NOT advance the
+            # tacops submodule's working tree, so we re-run submodule update
+            # to move tacops to the commit pinned by target.
+            git -C "$REPO_DIR" checkout --detach "origin/$TGT_BRANCH"
+            git -C "$REPO_DIR" submodule update --init --recursive 3rdparty/tacops
+            tgt_tacops_commit=$(git -C "$REPO_DIR/3rdparty/tacops" rev-parse HEAD)
+            echo "target tacops commit: $tgt_tacops_commit"
+            echo "::set-variable name=resolved_target_tacops_commit::$tgt_tacops_commit"
+            pack_and_ship target
+
+            rm -rf "$STAGE"
+            echo "both branches shipped to $REMOTE:$BASE/{sglang-source,sglang-target}"
+        retry-times: 3
+- name: prefill-source
+  label:
+  - Build
+  jobs:
+    job_prefill_source:
+      name: prefill bench (source branch)
+      runs-on:
+        self-hosted: true
+        node-name: BUILD_poddrrvm_21.214.65.125
+        agent-selector:
+        - linux
+      steps:
+      - name: launch sglang & wait ready
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            IMAGE="${{variables.docker_image}}"
+            MODEL="${{variables.model_path}}"
+            PORT="${{variables.serve_port}}"
+            CONTAINER="perf_prefill_source_${{ci.build_id}}"
+            LOG_DIR_HOST="${{variables.log_dir_host}}/${{ci.build_id}}/prefill-source"
+            CODE_DIR_HOST="${{variables.workspace_dir_host}}/${{ci.build_id}}/sglang-source"
+            LOG_FILE="$LOG_DIR_HOST/sglang.log"
+            READY_TIMEOUT=${{variables.serve_ready_timeout_seconds}}
+            GPU_TIMEOUT=${{variables.gpu_wait_timeout_seconds}}
+            GPU_THRESHOLD=${{variables.gpu_idle_vram_mib_threshold}}
+
+            echo "=== wait for GPUs idle ==="
+            deadline=$(( $(date +%s) + GPU_TIMEOUT ))
+            while true; do
+              csv=$($SSH "$REMOTE" 'amd-smi metric --mem-usage --csv') || { sleep 30; continue; }
+              max_used=$(echo "$csv" | awk -F',' 'NR>1 {if ($3+0 > m) m=$3+0} END {print m+0}')
+              echo "max used_vram: ${max_used} MiB (threshold: ${GPU_THRESHOLD})"
+              [ "$max_used" -lt "$GPU_THRESHOLD" ] && { echo "GPUs idle."; break; }
+              [ "$(date +%s)" -ge "$deadline" ] && { echo "GPU wait timeout"; exit 1; }
+              sleep 30
+            done
+
+            echo "=== launch sglang container ==="
+            $SSH "$REMOTE" "bash -s -- '$CONTAINER' '$IMAGE' '$MODEL' '$PORT' '$LOG_DIR_HOST' '$CODE_DIR_HOST' '${{variables.src_prefill_serve_args}}' '${{variables.src_prefill_serve_envs}}'" <<'REMOTE_EOF'
+            set -ex
+            CONTAINER="$1"; IMAGE="$2"; MODEL="$3"; PORT="$4"
+            LOG_DIR_HOST="$5"; CODE_DIR_HOST="$6"; SERVE_ARGS="$7"; SERVE_ENVS="$8"
+
+            echo 0 > /proc/sys/kernel/numa_balancing || true
+            docker pull "$IMAGE"
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            mkdir -p "$LOG_DIR_HOST"
+            : > "$LOG_DIR_HOST/sglang.log"
+
+            test -d "$CODE_DIR_HOST/python/sglang" || {
+              echo "ERROR: $CODE_DIR_HOST/python/sglang not found"; exit 1; }
+
+            # Expand the space-separated KEY=VAL string into "-e KEY=VAL ..." flags.
+            ENV_FLAGS=""
+            for kv in $SERVE_ENVS; do
+              ENV_FLAGS="$ENV_FLAGS -e $kv"
+            done
+
+            docker run -d \
+              --name "$CONTAINER" \
+              --device=/dev/kfd --device=/dev/dri \
+              --security-opt seccomp=unconfined \
+              --privileged --cap-add=IPC_LOCK \
+              --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=1048576:1048576 \
+              --net=host --ipc=host \
+              -v /data:/data \
+              -v "$LOG_DIR_HOST:/sgl-log" \
+              -v "$CODE_DIR_HOST:/sglang" \
+              -e PYTHONPATH=/sglang/python \
+              $ENV_FLAGS \
+              "$IMAGE" \
+              bash -c "set -e; pip install --no-build-isolation /sglang/3rdparty/tacops; exec sglang serve --model-path '$MODEL' --port '$PORT' $SERVE_ARGS > /sgl-log/sglang.log 2>&1"
+
+            echo "container $CONTAINER started"
+            REMOTE_EOF
+
+            echo "=== wait for sglang ready ==="
+            deadline=$(( $(date +%s) + READY_TIMEOUT ))
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < '$LOG_FILE' 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) '$LOG_FILE'" || true
+                printed=$total
+              fi
+              alive=$($SSH "$REMOTE" "docker inspect -f '{{.State.Running}}' $CONTAINER 2>/dev/null" || echo missing)
+              if [ "$alive" != "true" ]; then
+                echo; echo "=== container died (state=$alive) ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1
+              fi
+              if $SSH "$REMOTE" "curl -fsS -m 5 http://localhost:${PORT}/health" >/dev/null 2>&1; then
+                echo; echo "=== sglang ready on port $PORT ==="
+                break
+              fi
+              [ "$(date +%s)" -ge "$deadline" ] && {
+                echo; echo "=== timeout ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1; }
+              sleep 15
+            done
+        retry-times: 3
+      - name: warmup bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_prefill_source_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/prefill-source"
+
+            # Warmup: run the bench once with the same args, but throw away
+            # JSON/PNG so they don't pollute $LOG_DIR (the cache writeback and
+            # report stages glob there). Stdout/stderr are still streamed via
+            # the same tail-based polling we use for the real bench.
+            echo "=== warmup ==="
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/warmup.exit /sgl-log/warmup.log
+              rm -rf /sgl-log/warmup-out
+              mkdir -p /sgl-log/warmup-out
+              python3 /sglang/.ci/scripts/prefill_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log/warmup-out \
+                ${{variables.prefill_args}} \
+                > /sgl-log/warmup.log 2>&1
+              echo \$? > /sgl-log/warmup.exit
+              rm -rf /sgl-log/warmup-out
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/warmup.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/warmup.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                fi
+                echo "=== warmup finished, exit=$rc ==="
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+        retry-times: 3
+      - name: run bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_prefill_source_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/prefill-source"
+
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/bench.exit
+              python3 /sglang/.ci/scripts/prefill_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log \
+                ${{variables.prefill_args}} \
+                > /sgl-log/bench.log 2>&1
+              echo \$? > /sgl-log/bench.exit
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/bench.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/bench.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                fi
+                echo "=== bench finished, exit=$rc ==="
+                $SSH "$REMOTE" "ls -la $LOG_DIR" || true
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+        retry-times: 3
+      - name: stop container
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -ex
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            $SSH "$REMOTE" "docker rm -f perf_prefill_source_${{ci.build_id}} 2>/dev/null" || true
+        retry-times: 3
+- name: prefill-target
+  label:
+  - Build
+  jobs:
+    job_prefill_target:
+      name: prefill bench (target branch)
+      runs-on:
+        self-hosted: true
+        node-name: BUILD_poddrrvm_21.214.65.125
+        agent-selector:
+        - linux
+      steps:
+      - name: check cache
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            SCP="scp -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            REPO_DIR="${{ci.workspace}}/sglang-repo-${{ci.build_id}}"
+            LOG_DIR_HOST="${{variables.log_dir_host}}/${{ci.build_id}}/prefill-target"
+
+            KEY=$(python3 "$REPO_DIR/.ci/scripts/cache_key.py" compute \
+              --role prefill \
+              --commit      "${{variables.resolved_target_commit}}" \
+              --image       "${{variables.docker_image}}" \
+              --model-path  "${{variables.model_path}}" \
+              --serve-args  "${{variables.tgt_prefill_serve_args}}" \
+              --serve-envs  "${{variables.tgt_prefill_serve_envs}}" \
+              --bench-args  "${{variables.prefill_args}}" \
+              --bench-script "$REPO_DIR/.ci/scripts/prefill_throughput.py" \
+              --tacops-commit "${{variables.resolved_target_tacops_commit}}")
+            DIR="${{variables.cache_dir_build}}/prefill/$KEY"
+            echo "cache key=$KEY"
+            echo "cache dir=$DIR"
+            echo "::set-variable name=prefill_target_cache_dir::$DIR"
+
+            json_count=$(ls "$DIR"/*prefill_throughput_results.json 2>/dev/null | wc -l)
+            png_count=$( ls "$DIR"/*prefill_throughput.png         2>/dev/null | wc -l)
+            if [ "${{variables.force_rerun_target}}" = "true" ]; then
+              echo "=== force_rerun_target=true; ignoring cache, will rerun and overwrite ==="
+            elif [ "$json_count" -ge 1 ] && [ "$png_count" -ge 1 ]; then
+              echo "=== cache HIT ==="
+              ls -la "$DIR"
+              # Stage cached artifacts under the remote $LOG_DIR_HOST so that
+              # the report stage can pick them up exactly like a real run.
+              $SSH "$REMOTE" "mkdir -p '$LOG_DIR_HOST'"
+              $SCP "$DIR"/*prefill_throughput_results.json "$REMOTE:$LOG_DIR_HOST/"
+              $SCP "$DIR"/*prefill_throughput.png          "$REMOTE:$LOG_DIR_HOST/"
+              echo "::set-variable name=prefill_target_cache_hit::true"
+            else
+              echo "=== cache MISS (will run bench and populate $DIR) ==="
+            fi
+        retry-times: 3
+      - name: launch sglang & wait ready
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            if [ "${{variables.prefill_target_cache_hit}}" = "true" ]; then
+              echo "prefill-target cache hit; skipping launch."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            IMAGE="${{variables.docker_image}}"
+            MODEL="${{variables.model_path}}"
+            PORT="${{variables.serve_port}}"
+            CONTAINER="perf_prefill_target_${{ci.build_id}}"
+            LOG_DIR_HOST="${{variables.log_dir_host}}/${{ci.build_id}}/prefill-target"
+            CODE_DIR_HOST="${{variables.workspace_dir_host}}/${{ci.build_id}}/sglang-target"
+            LOG_FILE="$LOG_DIR_HOST/sglang.log"
+            READY_TIMEOUT=${{variables.serve_ready_timeout_seconds}}
+
+            echo "=== launch sglang container ==="
+            $SSH "$REMOTE" "bash -s -- '$CONTAINER' '$IMAGE' '$MODEL' '$PORT' '$LOG_DIR_HOST' '$CODE_DIR_HOST' '${{variables.tgt_prefill_serve_args}}' '${{variables.tgt_prefill_serve_envs}}'" <<'REMOTE_EOF'
+            set -ex
+            CONTAINER="$1"; IMAGE="$2"; MODEL="$3"; PORT="$4"
+            LOG_DIR_HOST="$5"; CODE_DIR_HOST="$6"; SERVE_ARGS="$7"; SERVE_ENVS="$8"
+
+            docker pull "$IMAGE"
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            mkdir -p "$LOG_DIR_HOST"
+            : > "$LOG_DIR_HOST/sglang.log"
+
+            test -d "$CODE_DIR_HOST/python/sglang" || {
+              echo "ERROR: $CODE_DIR_HOST/python/sglang not found"; exit 1; }
+
+            ENV_FLAGS=""
+            for kv in $SERVE_ENVS; do
+              ENV_FLAGS="$ENV_FLAGS -e $kv"
+            done
+
+            docker run -d \
+              --name "$CONTAINER" \
+              --device=/dev/kfd --device=/dev/dri \
+              --security-opt seccomp=unconfined \
+              --privileged --cap-add=IPC_LOCK \
+              --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=1048576:1048576 \
+              --net=host --ipc=host \
+              -v /data:/data \
+              -v "$LOG_DIR_HOST:/sgl-log" \
+              -v "$CODE_DIR_HOST:/sglang" \
+              -e PYTHONPATH=/sglang/python \
+              $ENV_FLAGS \
+              "$IMAGE" \
+              bash -c "set -e; pip install --no-build-isolation /sglang/3rdparty/tacops; exec sglang serve --model-path '$MODEL' --port '$PORT' $SERVE_ARGS > /sgl-log/sglang.log 2>&1"
+
+            echo "container $CONTAINER started"
+            REMOTE_EOF
+
+            echo "=== wait for sglang ready ==="
+            deadline=$(( $(date +%s) + READY_TIMEOUT ))
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < '$LOG_FILE' 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) '$LOG_FILE'" || true
+                printed=$total
+              fi
+              alive=$($SSH "$REMOTE" "docker inspect -f '{{.State.Running}}' $CONTAINER 2>/dev/null" || echo missing)
+              if [ "$alive" != "true" ]; then
+                echo; echo "=== container died (state=$alive) ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1
+              fi
+              if $SSH "$REMOTE" "curl -fsS -m 5 http://localhost:${PORT}/health" >/dev/null 2>&1; then
+                echo; echo "=== sglang ready on port $PORT ==="
+                break
+              fi
+              [ "$(date +%s)" -ge "$deadline" ] && {
+                echo; echo "=== timeout ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1; }
+              sleep 15
+            done
+        retry-times: 3
+      - name: warmup bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            if [ "${{variables.prefill_target_cache_hit}}" = "true" ]; then
+              echo "prefill-target cache hit; skipping warmup."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_prefill_target_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/prefill-target"
+
+            echo "=== warmup ==="
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/warmup.exit /sgl-log/warmup.log
+              rm -rf /sgl-log/warmup-out
+              mkdir -p /sgl-log/warmup-out
+              python3 /sglang/.ci/scripts/prefill_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log/warmup-out \
+                ${{variables.prefill_args}} \
+                > /sgl-log/warmup.log 2>&1
+              echo \$? > /sgl-log/warmup.exit
+              rm -rf /sgl-log/warmup-out
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/warmup.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/warmup.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                fi
+                echo "=== warmup finished, exit=$rc ==="
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+        retry-times: 3
+      - name: run bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            if [ "${{variables.prefill_target_cache_hit}}" = "true" ]; then
+              echo "prefill-target cache hit; skipping bench."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            SCP="scp -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_prefill_target_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/prefill-target"
+            REPO_DIR="${{ci.workspace}}/sglang-repo-${{ci.build_id}}"
+
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/bench.exit
+              python3 /sglang/.ci/scripts/prefill_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log \
+                ${{variables.prefill_args}} \
+                > /sgl-log/bench.log 2>&1
+              echo \$? > /sgl-log/bench.exit
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/bench.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/bench.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                fi
+                echo "=== bench finished, exit=$rc ==="
+                $SSH "$REMOTE" "ls -la $LOG_DIR" || true
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+
+            echo "=== writing back to cache ==="
+            DIR="${{variables.prefill_target_cache_dir}}"
+            mkdir -p "$DIR"
+            # Overwrite stale artifacts from a previous build at the same key
+            # before pulling new ones, so timestamped filenames don't pile up.
+            rm -f "$DIR"/*.json "$DIR"/*.png "$DIR/meta.json"
+            $SCP "$REMOTE:$LOG_DIR/"*prefill_throughput_results.json "$DIR/"
+            $SCP "$REMOTE:$LOG_DIR/"*prefill_throughput.png          "$DIR/"
+            python3 "$REPO_DIR/.ci/scripts/cache_key.py" write-meta \
+              --out "$DIR" \
+              --role prefill \
+              --commit      "${{variables.resolved_target_commit}}" \
+              --image       "${{variables.docker_image}}" \
+              --model-path  "${{variables.model_path}}" \
+              --serve-args  "${{variables.tgt_prefill_serve_args}}" \
+              --serve-envs  "${{variables.tgt_prefill_serve_envs}}" \
+              --bench-args  "${{variables.prefill_args}}" \
+              --bench-script "$REPO_DIR/.ci/scripts/prefill_throughput.py" \
+              --tacops-commit "${{variables.resolved_target_tacops_commit}}"
+            ls -la "$DIR"
+        retry-times: 3
+      - name: stop container
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -ex
+            if [ "${{variables.prefill_target_cache_hit}}" = "true" ]; then
+              echo "prefill-target cache hit; nothing to stop."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            $SSH "$REMOTE" "docker rm -f perf_prefill_target_${{ci.build_id}} 2>/dev/null" || true
+        retry-times: 3
+- name: decode-source
+  label:
+  - Build
+  jobs:
+    job_decode_source:
+      name: decode bench (source branch)
+      runs-on:
+        self-hosted: true
+        node-name: BUILD_poddrrvm_21.214.65.125
+        agent-selector:
+        - linux
+      steps:
+      - name: "launch sglang, wait ready & parse pool"
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            IMAGE="${{variables.docker_image}}"
+            MODEL="${{variables.model_path}}"
+            PORT="${{variables.serve_port}}"
+            CONTAINER="perf_decode_source_${{ci.build_id}}"
+            LOG_DIR_HOST="${{variables.log_dir_host}}/${{ci.build_id}}/decode-source"
+            CODE_DIR_HOST="${{variables.workspace_dir_host}}/${{ci.build_id}}/sglang-source"
+            LOG_FILE="$LOG_DIR_HOST/sglang.log"
+            READY_TIMEOUT=${{variables.serve_ready_timeout_seconds}}
+
+            echo "=== launch sglang container ==="
+            $SSH "$REMOTE" "bash -s -- '$CONTAINER' '$IMAGE' '$MODEL' '$PORT' '$LOG_DIR_HOST' '$CODE_DIR_HOST' '${{variables.src_decode_serve_args}}' '${{variables.src_decode_serve_envs}}'" <<'REMOTE_EOF'
+            set -ex
+            CONTAINER="$1"; IMAGE="$2"; MODEL="$3"; PORT="$4"
+            LOG_DIR_HOST="$5"; CODE_DIR_HOST="$6"; SERVE_ARGS="$7"; SERVE_ENVS="$8"
+
+            docker pull "$IMAGE"
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            mkdir -p "$LOG_DIR_HOST"
+            : > "$LOG_DIR_HOST/sglang.log"
+
+            test -d "$CODE_DIR_HOST/python/sglang" || {
+              echo "ERROR: $CODE_DIR_HOST/python/sglang not found"; exit 1; }
+
+            ENV_FLAGS=""
+            for kv in $SERVE_ENVS; do
+              ENV_FLAGS="$ENV_FLAGS -e $kv"
+            done
+
+            docker run -d \
+              --name "$CONTAINER" \
+              --device=/dev/kfd --device=/dev/dri \
+              --security-opt seccomp=unconfined \
+              --privileged --cap-add=IPC_LOCK \
+              --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=1048576:1048576 \
+              --net=host --ipc=host \
+              -v /data:/data \
+              -v "$LOG_DIR_HOST:/sgl-log" \
+              -v "$CODE_DIR_HOST:/sglang" \
+              -e PYTHONPATH=/sglang/python \
+              $ENV_FLAGS \
+              "$IMAGE" \
+              bash -c "set -e; pip install --no-build-isolation /sglang/3rdparty/tacops; exec sglang serve --model-path '$MODEL' --port '$PORT' $SERVE_ARGS > /sgl-log/sglang.log 2>&1"
+
+            echo "container $CONTAINER started"
+            REMOTE_EOF
+
+            echo "=== wait for sglang ready ==="
+            deadline=$(( $(date +%s) + READY_TIMEOUT ))
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < '$LOG_FILE' 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) '$LOG_FILE'" || true
+                printed=$total
+              fi
+              alive=$($SSH "$REMOTE" "docker inspect -f '{{.State.Running}}' $CONTAINER 2>/dev/null" || echo missing)
+              if [ "$alive" != "true" ]; then
+                echo; echo "=== container died (state=$alive) ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1
+              fi
+              if $SSH "$REMOTE" "curl -fsS -m 5 http://localhost:${PORT}/health" >/dev/null 2>&1; then
+                echo; echo "=== sglang ready on port $PORT ==="
+                break
+              fi
+              [ "$(date +%s)" -ge "$deadline" ] && {
+                echo; echo "=== timeout ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1; }
+              sleep 15
+            done
+
+            echo "=== parse DSV4 pool size ==="
+            full=$($SSH "$REMOTE" "grep -oE 'DSV4 pool sizes: full=[0-9]+' '$LOG_FILE' | tail -1 | awk -F= '{print \$NF}'" || echo "")
+            if [ -z "$full" ]; then
+              echo "ERROR: cannot find 'DSV4 pool sizes: full=' in $LOG_FILE"
+              $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null"|| true
+              exit 1
+            fi
+            kv_k=$(( full / 1024 ))
+            echo "DSV4 pool full=$full -> --max-total-kvcache-length-k=$kv_k"
+            echo "::set-variable name=decode_source_kv_k::$kv_k"
+        retry-times: 3
+      - name: warmup bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_decode_source_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/decode-source"
+            KV_K="${{variables.decode_source_kv_k}}"
+
+            [ -z "$KV_K" ] && { echo "ERROR: decode_source_kv_k not set"; exit 1; }
+
+            echo "=== warmup ==="
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/warmup.exit /sgl-log/warmup.log
+              rm -rf /sgl-log/warmup-out
+              mkdir -p /sgl-log/warmup-out
+              python3 /sglang/.ci/scripts/decode_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log/warmup-out \
+                --max-total-kvcache-length-k $KV_K \
+                ${{variables.decode_args}} \
+                > /sgl-log/warmup.log 2>&1
+              echo \$? > /sgl-log/warmup.exit
+              rm -rf /sgl-log/warmup-out
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/warmup.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/warmup.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                fi
+                echo "=== warmup finished, exit=$rc ==="
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+        retry-times: 3
+      - name: run bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_decode_source_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/decode-source"
+            KV_K="${{variables.decode_source_kv_k}}"
+
+            [ -z "$KV_K" ] && { echo "ERROR: decode_source_kv_k not set"; exit 1; }
+            echo "using --max-total-kvcache-length-k=$KV_K"
+
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/bench.exit
+              python3 /sglang/.ci/scripts/decode_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log \
+                --max-total-kvcache-length-k $KV_K \
+                ${{variables.decode_args}} \
+                > /sgl-log/bench.log 2>&1
+              echo \$? > /sgl-log/bench.exit
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/bench.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/bench.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                fi
+                echo "=== bench finished, exit=$rc ==="
+                $SSH "$REMOTE" "ls -la $LOG_DIR" || true
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+        retry-times: 3
+      - name: stop container
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -ex
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            $SSH "$REMOTE" "docker rm -f perf_decode_source_${{ci.build_id}} 2>/dev/null" || true
+        retry-times: 3
+- name: decode-target
+  label:
+  - Build
+  jobs:
+    job_decode_target:
+      name: decode bench (target branch)
+      runs-on:
+        self-hosted: true
+        node-name: BUILD_poddrrvm_21.214.65.125
+        agent-selector:
+        - linux
+      steps:
+      - name: check cache
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            SCP="scp -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            REPO_DIR="${{ci.workspace}}/sglang-repo-${{ci.build_id}}"
+            LOG_DIR_HOST="${{variables.log_dir_host}}/${{ci.build_id}}/decode-target"
+
+            KEY=$(python3 "$REPO_DIR/.ci/scripts/cache_key.py" compute \
+              --role decode \
+              --commit      "${{variables.resolved_target_commit}}" \
+              --image       "${{variables.docker_image}}" \
+              --model-path  "${{variables.model_path}}" \
+              --serve-args  "${{variables.tgt_decode_serve_args}}" \
+              --serve-envs  "${{variables.tgt_decode_serve_envs}}" \
+              --bench-args  "${{variables.decode_args}}" \
+              --bench-script "$REPO_DIR/.ci/scripts/decode_throughput.py" \
+              --tacops-commit "${{variables.resolved_target_tacops_commit}}")
+            DIR="${{variables.cache_dir_build}}/decode/$KEY"
+            echo "cache key=$KEY"
+            echo "cache dir=$DIR"
+            echo "::set-variable name=decode_target_cache_dir::$DIR"
+
+            json_count=$(ls "$DIR"/*decode_tpot_results.json 2>/dev/null | wc -l)
+            png_count=$( ls "$DIR"/*decode_tpot.png         2>/dev/null | wc -l)
+            # decode also needs kv_k.txt: without it we can't run the bench step
+            # in a HIT path (and we don't, but keep the gate strict in case the
+            # cache dir was partially written by a previous bug).
+            if [ "${{variables.force_rerun_target}}" = "true" ]; then
+              echo "=== force_rerun_target=true; ignoring cache, will rerun and overwrite ==="
+            elif [ "$json_count" -ge 1 ] && [ "$png_count" -ge 1 ] && [ -f "$DIR/kv_k.txt" ]; then
+              echo "=== cache HIT ==="
+              ls -la "$DIR"
+              KV_K=$(cat "$DIR/kv_k.txt")
+              echo "cached kv_k=$KV_K"
+              echo "::set-variable name=decode_target_kv_k::$KV_K"
+              $SSH "$REMOTE" "mkdir -p '$LOG_DIR_HOST'"
+              $SCP "$DIR"/*decode_tpot_results.json "$REMOTE:$LOG_DIR_HOST/"
+              $SCP "$DIR"/*decode_tpot.png          "$REMOTE:$LOG_DIR_HOST/"
+              echo "::set-variable name=decode_target_cache_hit::true"
+            else
+              echo "=== cache MISS (will run bench and populate $DIR) ==="
+            fi
+        retry-times: 3
+      - name: "launch sglang, wait ready & parse pool"
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            if [ "${{variables.decode_target_cache_hit}}" = "true" ]; then
+              echo "decode-target cache hit; skipping launch."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            IMAGE="${{variables.docker_image}}"
+            MODEL="${{variables.model_path}}"
+            PORT="${{variables.serve_port}}"
+            CONTAINER="perf_decode_target_${{ci.build_id}}"
+            LOG_DIR_HOST="${{variables.log_dir_host}}/${{ci.build_id}}/decode-target"
+            CODE_DIR_HOST="${{variables.workspace_dir_host}}/${{ci.build_id}}/sglang-target"
+            LOG_FILE="$LOG_DIR_HOST/sglang.log"
+            READY_TIMEOUT=${{variables.serve_ready_timeout_seconds}}
+
+            echo "=== launch sglang container ==="
+            $SSH "$REMOTE" "bash -s -- '$CONTAINER' '$IMAGE' '$MODEL' '$PORT' '$LOG_DIR_HOST' '$CODE_DIR_HOST' '${{variables.tgt_decode_serve_args}}' '${{variables.tgt_decode_serve_envs}}'" <<'REMOTE_EOF'
+            set -ex
+            CONTAINER="$1"; IMAGE="$2"; MODEL="$3"; PORT="$4"
+            LOG_DIR_HOST="$5"; CODE_DIR_HOST="$6"; SERVE_ARGS="$7"; SERVE_ENVS="$8"
+
+            docker pull "$IMAGE"
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            mkdir -p "$LOG_DIR_HOST"
+            : > "$LOG_DIR_HOST/sglang.log"
+
+            test -d "$CODE_DIR_HOST/python/sglang" || {
+              echo "ERROR: $CODE_DIR_HOST/python/sglang not found"; exit 1; }
+
+            ENV_FLAGS=""
+            for kv in $SERVE_ENVS; do
+              ENV_FLAGS="$ENV_FLAGS -e $kv"
+            done
+
+            docker run -d \
+              --name "$CONTAINER" \
+              --device=/dev/kfd --device=/dev/dri \
+              --security-opt seccomp=unconfined \
+              --privileged --cap-add=IPC_LOCK \
+              --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=1048576:1048576 \
+              --net=host --ipc=host \
+              -v /data:/data \
+              -v "$LOG_DIR_HOST:/sgl-log" \
+              -v "$CODE_DIR_HOST:/sglang" \
+              -e PYTHONPATH=/sglang/python \
+              $ENV_FLAGS \
+              "$IMAGE" \
+              bash -c "set -e; pip install --no-build-isolation /sglang/3rdparty/tacops; exec sglang serve --model-path '$MODEL' --port '$PORT' $SERVE_ARGS > /sgl-log/sglang.log 2>&1"
+
+            echo "container $CONTAINER started"
+            REMOTE_EOF
+
+            echo "=== wait for sglang ready ==="
+            deadline=$(( $(date +%s) + READY_TIMEOUT ))
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < '$LOG_FILE' 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) '$LOG_FILE'" || true
+                printed=$total
+              fi
+              alive=$($SSH "$REMOTE" "docker inspect -f '{{.State.Running}}' $CONTAINER 2>/dev/null" || echo missing)
+              if [ "$alive" != "true" ]; then
+                echo; echo "=== container died (state=$alive) ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1
+              fi
+              if $SSH "$REMOTE" "curl -fsS -m 5 http://localhost:${PORT}/health" >/dev/null 2>&1; then
+                echo; echo "=== sglang ready on port $PORT ==="
+                break
+              fi
+              [ "$(date +%s)" -ge "$deadline" ] && {
+                echo; echo "=== timeout ==="
+                $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+                exit 1; }
+              sleep 15
+            done
+
+            echo "=== parse DSV4 pool size ==="
+            full=$($SSH "$REMOTE" "grep -oE 'DSV4 pool sizes: full=[0-9]+' '$LOG_FILE' | tail -1 | awk -F= '{print \$NF}'" || echo "")
+            if [ -z "$full" ]; then
+              echo "ERROR: cannot find 'DSV4 pool sizes: full=' in $LOG_FILE"
+              $SSH "$REMOTE" "tail -n 200 '$LOG_FILE' 2>/dev/null" || true
+              exit 1
+            fi
+            kv_k=$(( full / 1024 ))
+            echo "DSV4 pool full=$full -> --max-total-kvcache-length-k=$kv_k"
+            echo "::set-variable name=decode_target_kv_k::$kv_k"
+        retry-times: 3
+      - name: warmup bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            if [ "${{variables.decode_target_cache_hit}}" = "true" ]; then
+              echo "decode-target cache hit; skipping warmup."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_decode_target_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/decode-target"
+            KV_K="${{variables.decode_target_kv_k}}"
+
+            [ -z "$KV_K" ] && { echo "ERROR: decode_target_kv_k not set"; exit 1; }
+
+            echo "=== warmup ==="
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/warmup.exit /sgl-log/warmup.log
+              rm -rf /sgl-log/warmup-out
+              mkdir -p /sgl-log/warmup-out
+              python3 /sglang/.ci/scripts/decode_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log/warmup-out \
+                --max-total-kvcache-length-k $KV_K \
+                ${{variables.decode_args}} \
+                > /sgl-log/warmup.log 2>&1
+              echo \$? > /sgl-log/warmup.exit
+              rm -rf /sgl-log/warmup-out
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/warmup.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/warmup.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/warmup.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/warmup.log" || true
+                fi
+                echo "=== warmup finished, exit=$rc ==="
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+        retry-times: 3
+      - name: run bench
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -e
+            if [ "${{variables.decode_target_cache_hit}}" = "true" ]; then
+              echo "decode-target cache hit; skipping bench."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            SCP="scp -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            PORT="${{variables.serve_port}}"
+            MODEL="${{variables.model_path}}"
+            CONTAINER="perf_decode_target_${{ci.build_id}}"
+            LOG_DIR="${{variables.log_dir_host}}/${{ci.build_id}}/decode-target"
+            KV_K="${{variables.decode_target_kv_k}}"
+            REPO_DIR="${{ci.workspace}}/sglang-repo-${{ci.build_id}}"
+
+            [ -z "$KV_K" ] && { echo "ERROR: decode_target_kv_k not set"; exit 1; }
+            echo "using --max-total-kvcache-length-k=$KV_K"
+
+            $SSH "$REMOTE" "docker exec -d $CONTAINER bash -c '
+              rm -f /sgl-log/bench.exit
+              python3 /sglang/.ci/scripts/decode_throughput.py \
+                --base-url http://127.0.0.1:$PORT \
+                --model $MODEL \
+                --save-path /sgl-log \
+                --max-total-kvcache-length-k $KV_K \
+                ${{variables.decode_args}} \
+                > /sgl-log/bench.log 2>&1
+              echo \$? > /sgl-log/bench.exit
+            '"
+
+            printed=0
+            while true; do
+              total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+              if [ "$total" -gt "$printed" ]; then
+                $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                printed=$total
+              fi
+              if $SSH "$REMOTE" "test -f $LOG_DIR/bench.exit"; then
+                rc=$($SSH "$REMOTE" "cat $LOG_DIR/bench.exit" || echo 99)
+                total=$($SSH "$REMOTE" "wc -l < $LOG_DIR/bench.log 2>/dev/null || echo 0" || echo 0)
+                if [ "$total" -gt "$printed" ]; then
+                  $SSH "$REMOTE" "tail -n $(( total - printed )) $LOG_DIR/bench.log" || true
+                fi
+                echo "=== bench finished, exit=$rc ==="
+                $SSH "$REMOTE" "ls -la $LOG_DIR" || true
+                [ "$rc" = "0" ] || exit 1
+                break
+              fi
+              sleep 15
+            done
+
+            echo "=== writing back to cache ==="
+            DIR="${{variables.decode_target_cache_dir}}"
+            mkdir -p "$DIR"
+            rm -f "$DIR"/*.json "$DIR"/*.png "$DIR/meta.json" "$DIR/kv_k.txt"
+            $SCP "$REMOTE:$LOG_DIR/"*decode_tpot_results.json "$DIR/"
+            $SCP "$REMOTE:$LOG_DIR/"*decode_tpot.png          "$DIR/"
+            echo "$KV_K" > "$DIR/kv_k.txt"
+            python3 "$REPO_DIR/.ci/scripts/cache_key.py" write-meta \
+              --out "$DIR" \
+              --role decode \
+              --commit      "${{variables.resolved_target_commit}}" \
+              --image       "${{variables.docker_image}}" \
+              --model-path  "${{variables.model_path}}" \
+              --serve-args  "${{variables.tgt_decode_serve_args}}" \
+              --serve-envs  "${{variables.tgt_decode_serve_envs}}" \
+              --bench-args  "${{variables.decode_args}}" \
+              --bench-script "$REPO_DIR/.ci/scripts/decode_throughput.py" \
+              --tacops-commit "${{variables.resolved_target_tacops_commit}}"
+            ls -la "$DIR"
+        retry-times: 3
+      - name: stop container
+        uses: linuxScript@1.*
+        with:
+          script: |-
+            set -ex
+            if [ "${{variables.decode_target_cache_hit}}" = "true" ]; then
+              echo "decode-target cache hit; nothing to stop."
+              exit 0
+            fi
+            REMOTE="${{variables.remote_host}}"
+            SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+            $SSH "$REMOTE" "docker rm -f perf_decode_target_${{ci.build_id}} 2>/dev/null" || true
+        retry-times: 3
+- name: report
+  label:
+  - Build
+  jobs:
+    job_report:
+      name: build comparison report (source vs target)
+      runs-on:
+        self-hosted: true
+        node-name: BUILD_poddrrvm_21.214.65.125
+        agent-selector:
+        - linux
+      steps:
+      - name: pull bench results & build report
+        with:
+          charsetType: UTF_8
+        run: |
+          set -e
+          REMOTE="${{variables.remote_host}}"
+          SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+          SSH="ssh -F ${{variables.ssh_config}} $SSH_OPTS"
+          SCP="scp -F ${{variables.ssh_config}} $SSH_OPTS"
+          BASE="${{variables.log_dir_host}}/${{ci.build_id}}"
+          # Use the just-checked-out repo's script, NOT a stale copy in the
+          # reusable workspace root. ${{ci.workspace}}/.ci may be left over
+          # from a previous build of this pipeline.
+          REPO_DIR="${{ci.workspace}}/sglang-repo-${{ci.build_id}}"
+
+          cd "${{ci.workspace}}"
+          # bk-ci reuses the workspace dir across builds, so any png/json left
+          # behind from a previous run would otherwise leak into this build's
+          # `report/` and show up in render_pngs(). Wipe before recreating.
+          rm -rf report-build report
+          mkdir -p report-build/source report-build/target report
+
+          for kind in source target; do
+            for sub in prefill decode; do
+              $SSH "$REMOTE" "ls $BASE/$sub-$kind/" || true
+              for pat in '*prefill_throughput_results.json' '*decode_tpot_results.json' '*prefill_throughput.png' '*decode_tpot.png'; do
+                files=$($SSH "$REMOTE" "ls $BASE/$sub-$kind/$pat 2>/dev/null" || true)
+                for f in $files; do
+                  [ -n "$f" ] && $SCP "$REMOTE:$f" "report-build/$kind/"
+                done
+              done
+            done
+            ls -la "report-build/$kind/"
+          done
+
+          prefill_source=$(ls report-build/source/*prefill_throughput_results.json 2>/dev/null | head -1)
+          decode_source=$( ls report-build/source/*decode_tpot_results.json       2>/dev/null | head -1)
+          prefill_target=$(ls report-build/target/*prefill_throughput_results.json 2>/dev/null | head -1)
+          decode_target=$( ls report-build/target/*decode_tpot_results.json       2>/dev/null | head -1)
+          for v in prefill_source decode_source prefill_target decode_target; do
+            eval "val=\$$v"
+            if [ -z "$val" ]; then
+              echo "ERROR: $v JSON missing"
+              exit 1
+            fi
+          done
+
+          # Stage all four PNGs (source vs target × prefill vs decode) into
+          # report/ with branch-prefixed names so render_pngs() can split them
+          # apart and the user can tell at a glance which side each plot is.
+          for kind in source target; do
+            for f in report-build/$kind/*prefill_throughput.png \
+                     report-build/$kind/*decode_tpot.png; do
+              [ -f "$f" ] || continue
+              cp "$f" "report/${kind}_$(basename "$f")"
+            done
+          done
+
+          python3 "$REPO_DIR/.ci/scripts/compare_report.py" \
+            --prefill-current  "$prefill_source" \
+            --decode-current   "$decode_source" \
+            --prefill-baseline "$prefill_target" \
+            --decode-baseline  "$decode_target" \
+            --build-info-json /dev/stdin \
+            --out-dir report \
+            --fail-threshold-pct "${{variables.regression_threshold_pct}}" \
+            <<META
+          {"build_num": "${{ci.build_num}}",
+           "source_branch": "${{variables.resolved_source_branch}}",
+           "target_branch": "${{variables.resolved_target_branch}}",
+           "image": "${{variables.docker_image}}",
+           "model_path": "${{variables.model_path}}",
+           "prefill_args": "${{variables.prefill_args}}",
+           "decode_args": "${{variables.decode_args}}",
+           "src_prefill_serve_args": "${{variables.src_prefill_serve_args}}",
+           "src_decode_serve_args": "${{variables.src_decode_serve_args}}",
+           "tgt_prefill_serve_args": "${{variables.tgt_prefill_serve_args}}",
+           "tgt_decode_serve_args": "${{variables.tgt_decode_serve_args}}",
+           "src_prefill_serve_envs": "${{variables.src_prefill_serve_envs}}",
+           "src_decode_serve_envs": "${{variables.src_decode_serve_envs}}",
+           "tgt_prefill_serve_envs": "${{variables.tgt_prefill_serve_envs}}",
+           "tgt_decode_serve_envs": "${{variables.tgt_decode_serve_envs}}",
+           "regression_threshold_pct": "${{variables.regression_threshold_pct}}",
+           "build_url": "${{ci.build_url}}"}
+          META
+
+          ls -la report/
+          echo "::set-output name=perf_report,type=report,label=Perf-Report,path=report::index.html"
+
+          # Gate AFTER set-output so the report is always published, even on
+          # regression failure. compare_report.py wrote regressions.txt with
+          # one line per row that breached the threshold.
+          THRESHOLD="${{variables.regression_threshold_pct}}"
+          if [ -s report/regressions.txt ]; then
+            echo "=========================================================="
+            echo "PERF GATE FAILED: rows regressed beyond ${THRESHOLD}%:"
+            cat report/regressions.txt
+            echo "=========================================================="
+            exit 1
+          fi
+          echo "perf gate passed (threshold=${THRESHOLD}%)"
+        shell: bash
+
+finally:
+  job_cleanup:
+    name: cleanup remote containers & workspace
+    runs-on:
+      self-hosted: true
+      node-name: BUILD_poddrrvm_21.214.65.125
+      agent-selector:
+      - linux
+    steps:
+    - name: stop containers & remove workspace
+      uses: linuxScript@1.*
+      with:
+        script: |-
+          REMOTE="${{variables.remote_host}}"
+          SSH="ssh -F ${{variables.ssh_config}} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=720 -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ControlMaster=auto -o ControlPath=/tmp/.ssh-cm-${{ci.build_id}}.sock -o ControlPersist=300 -o LogLevel=ERROR"
+          BASE="${{variables.workspace_dir_host}}/${{ci.build_id}}"
+          for c in perf_prefill_source_${{ci.build_id}} perf_prefill_target_${{ci.build_id}} \
+                   perf_decode_source_${{ci.build_id}}  perf_decode_target_${{ci.build_id}}; do
+            $SSH "$REMOTE" "docker rm -f $c 2>/dev/null" || true
+          done
+          $SSH "$REMOTE" "rm -rf '$BASE'" || true
+      retry-times: 3
+notices:
+- if: SUCCESS
+  type:
+  - wework-message
+  receivers:
+  - "${{ci.actor}}"
+  content: "✅【${{ci.pipeline_name}}】#${{ci.build_num}} 成功，触发人 ${{ci.actor}}"
+  attach-build-url: true
+- if: FAILURE
+  type:
+  - wework-message
+  receivers:
+  - "${{ci.actor}}"
+  content: "❌【${{ci.pipeline_name}}】#${{ci.build_num}} 失败，触发人 ${{ci.actor}}"
+  attach-build-url: true
+
+concurrency:
+  queue-timeout-minutes: 60
+  max-parallel: 1
+
+syntax-dialect: CONSTRAINT
