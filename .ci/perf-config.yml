@@ -1,0 +1,33 @@
+# Per-MR perf-test config. Read by .ci/auto-mr-perf.yml from the SOURCE branch
+# of the MR ONLY on MR-triggered runs. Manual runs ignore this file -- fill in
+# the variable values directly via the bk-ci UI instead.
+#
+# Recognised fields. Empty string or missing key keeps the yaml-level default.
+#   - prefill_args / decode_args : workload (same for source and target side)
+#   - src_*_serve_args : sglang CLI args used when benching SOURCE branch code
+#   - tgt_*_serve_args : sglang CLI args used when benching TARGET branch code
+#   - src_*_serve_envs : space-separated KEY=VAL passed via `docker run -e`
+#                        when benching SOURCE branch code
+#   - tgt_*_serve_envs : ditto, target side
+#   - regression_threshold_pct : geomean(src/tgt) shift (in percent) that
+#     fails the pipeline. Pipeline still publishes the report before failing.
+#
+# Branches are git-isolated, so two MRs editing this file in parallel never
+# overwrite each other.
+
+regression_threshold_pct: "30"
+
+prefill_args: "--min-input-length-k 50 --max-input-length-k 100 --max-input-length-step-k 25 --chunk-size-k 2 --prefix-cache --dp-size 8"
+decode_args:  "--max-input-length-k 190 --max-batch-size 128 --dp-size 8"
+
+src_prefill_serve_args: "--trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 256 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer"
+src_decode_serve_args:  "--trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-num-draft-tokens 4 --speculative-eagle-topk 1 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 1024 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer"
+
+tgt_prefill_serve_args: "--trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 256 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer"
+tgt_decode_serve_args:  "--trust-remote-code --swa-full-tokens-ratio 0.1 --tp 8 --dp 8 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-num-draft-tokens 4 --speculative-eagle-topk 1 --enable-dp-attention --enable-cache-report --attention-backend dsv4 --max-running-request 1024 --page-size 256 --chunked-prefill-size 32768 --mem-fraction-static 0.9 --disable-shared-experts-fusion --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 --enable-prefill-delayer"
+
+src_prefill_serve_envs: "SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0"
+src_decode_serve_envs:  "SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0"
+
+tgt_prefill_serve_envs: "SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0"
+tgt_decode_serve_envs:  "SGLANG_DEFAULT_THINKING=1 SGLANG_DSV4_REASONING_EFFORT=max SGLANG_OPT_DEEPGEMM_HC_PRENORM=false SGLANG_USE_AITER=1 SGLANG_USE_ROCM700A=1 SGLANG_OPT_USE_FUSED_COMPRESS=true SGLANG_HACK_FLASHMLA_BACKEND=triton SGLANG_OPT_FP8_WO_A_GEMM=false SGLANG_OPT_USE_JIT_INDEXER_METADATA=false SGLANG_OPT_USE_TOPK_V2=false SGLANG_OPT_USE_AITER_INDEXER=true SGLANG_OPT_USE_TILELANG_INDEXER=false SGLANG_OPT_USE_TILELANG_MHC_PRE=false SGLANG_OPT_USE_TILELANG_MHC_POST=false SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false SGLANG_ROCM_USE_MULTI_STREAM=false AITER_BF16_FP8_MOE_BOUND=0"
