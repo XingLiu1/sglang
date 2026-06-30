@@ -946,6 +946,12 @@ class Envs:
     # this combination on the host side.
     SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND = EnvBool(False)
     SGLANG_OPT_FIX_MEGA_MOE_MEMORY = EnvBool(False)
+    # K-dim alignment (in logical elements) for the AITER CK FP4 MoE kernel.
+    # The intermediate_size_per_partition is padded up to a multiple of this
+    # value. Default 256 (the kernel historically required K_packed % 128 == 0,
+    # i.e. K_logical % 256 == 0). Set to 128 on aiter builds that support
+    # K_logical % 128 == 0 to avoid padding e.g. 384 -> 512.
+    SGLANG_OPT_FP4_MOE_K_ALIGN = EnvInt(256)
 
     # TopK
     SGLANG_OPT_USE_FUSED_HASH_TOPK = EnvBool(True)
