@@ -622,6 +622,10 @@ class DeepseekV4HipRadixBackend(
         batch_size = len(seq_lens)
         seq_lens = seq_lens + self.speculative_num_draft_tokens
         seq_lens_cpu = [x + self.speculative_num_draft_tokens for x in seq_lens_cpu]
+        # Target verification appends draft tokens to every sequence. Expand the
+        # page-table range as well, especially when the original length ends on
+        # a page boundary (for example, 1024 -> 1028 with page_size=256).
+        max_seq_len = max(max_seq_len, max(seq_lens_cpu, default=0))
         extend_seq_lens_cpu = [self.speculative_num_draft_tokens] * batch_size
         extend_seq_lens = self._move_to_device(extend_seq_lens_cpu)
         num_tokens = self.speculative_num_draft_tokens * batch_size
@@ -945,6 +949,16 @@ class DeepseekV4HipRadixBackend(
         max_seq_len = int(seq_lens_cpu.max().item())
 
         if forward_batch.forward_mode.is_decode_or_idle():
+            # Each eager draft step writes one more KV slot than the committed
+            # prefix represented by forward_batch.seq_lens.  Advance the
+            # per-step attention lengths just like FlashAttention does; without
+            # this, later steps reuse an undersized page table and stale C4/SWA
+            # metadata while writing to the next draft cache location.
+            if forward_batch.spec_info is not None and self.mtp_enabled:
+                draft_decode_length = self.speculative_step_id + 1
+                seq_lens = seq_lens + draft_decode_length
+                seq_lens_cpu = seq_lens_cpu + draft_decode_length
+                max_seq_len = int(seq_lens_cpu.max().item())
             # DSv4 bakes this step's KV write target (c4/c128) into metadata,
             # so slice the shared multi-step out_cache_loc now, not at forward time.
             out_cache_loc = forward_batch.out_cache_loc
@@ -1178,17 +1192,6 @@ class DeepseekV4HipRadixBackend(
         # decode
         is_decode = forward_batch.forward_mode.is_decode_or_idle()
         if is_decode:
-            state_slot = forward_batch.req_pool_indices[:T]
-            if save_kv_cache:
-                runtime.store_swa_into_unified(
-                    kv=kv,
-                    state_slot=state_slot,
-                    positions=positions,
-                    unified_kv=unified,
-                    win=win,
-                    ring_stride=ring_stride,
-                    final_pos=positions,
-                )
             unified_metadata = core_attn_metadata.unified
             if compress_ratio == 0:
                 kv_indices = unified_metadata.swa_indices
@@ -1199,17 +1202,45 @@ class DeepseekV4HipRadixBackend(
             elif compress_ratio == 4:
                 kv_indices = unified_metadata.csa_indices
                 kv_indptr = unified_metadata.csa_indptr
+            else:
+                raise ValueError(f"bad compress_ratio {compress_ratio}")
+
+            # Multi-step speculative metadata is planned before DP/MLP-sync
+            # padding. The ragged indptr therefore describes only real query
+            # rows, while q/kv may already include synthetic rows required by
+            # the subsequent DP collective. Passing the padded T to paged
+            # decode reads kv_indptr[T + 1] out of bounds. Run unified decode
+            # and SWA store for the metadata's real row count, then restore the
+            # padded output shape for the downstream collective.
+            padded_T = T
+            real_T = min(T, kv_indptr.shape[0] - 1)
+            pad_output = real_T < padded_T
+            if pad_output:
+                q = q[:real_T]
+                kv = kv[:real_T]
+                positions = positions[:real_T]
+
+            state_slot = forward_batch.req_pool_indices[:real_T]
+            if save_kv_cache:
+                runtime.store_swa_into_unified(
+                    kv=kv,
+                    state_slot=state_slot,
+                    positions=positions,
+                    unified_kv=unified,
+                    win=win,
+                    ring_stride=ring_stride,
+                    final_pos=positions,
+                )
+            if compress_ratio == 4:
                 runtime.fill_compress_tail(
                     indices=kv_indices,
                     indptr=kv_indptr,
-                    prefix_len=core_attn_metadata.swa_topk_lengths[:T],
-                    page_indices=c4_pi[:T],
-                    valid_len=core_attn_metadata.c4_sparse_topk_lengths_raw[:T],
+                    prefix_len=core_attn_metadata.swa_topk_lengths[:real_T],
+                    page_indices=c4_pi[:real_T],
+                    valid_len=core_attn_metadata.c4_sparse_topk_lengths_raw[:real_T],
                     swa_pages=swa_pages,
                 )
-            else:
-                raise ValueError(f"bad compress_ratio {compress_ratio}")
-            return runtime.decode(
+            o = runtime.decode(
                 q=q,
                 unified_kv=unified,
                 kv_indices=kv_indices,
@@ -1217,6 +1248,15 @@ class DeepseekV4HipRadixBackend(
                 attn_sink=attn_sink,
                 softmax_scale=self.softmax_scale,
             )
+            if pad_output:
+                o = torch.cat(
+                    [
+                        o,
+                        o.new_zeros(padded_T - real_T, *o.shape[1:]),
+                    ],
+                    dim=0,
+                )
+            return o
 
         # prefill / extend
         state_slot = core_attn_metadata.unified.pf_state_slot

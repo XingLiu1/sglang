@@ -1020,12 +1020,18 @@ try:
         fp8_fused_moe_aiter_apply,
     )
 except ImportError:
+    try:
+        from opforge.adapter.sglang import (
+            fp8_fused_moe_aiter_process_weights,
+            fp8_fused_moe_aiter_apply,
+        )
+    except ImportError:
 
-    def fp8_fused_moe_aiter_process_weights(fn):
-        return fn
+        def fp8_fused_moe_aiter_process_weights(fn):
+            return fn
 
-    def fp8_fused_moe_aiter_apply(fn):
-        return fn
+        def fp8_fused_moe_aiter_apply(fn):
+            return fn
 
 ########### tacops aiter adapter ###########
 
