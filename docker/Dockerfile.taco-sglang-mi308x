@@ -1,0 +1,44 @@
+FROM ccr.ccs.tencentyun.com/taco/sglang-rocm:v0.5.14-rocm720-mi308x-dsv4pro-0716-cgfix
+
+ARG SGLANG_REVISION=15b760f969d6989b605d3b00dd02d448a6571bd8
+ARG SGLANG_PACKAGE_VERSION=0.5.14.dev20260716+g15b760f969
+ARG SOURCE_ARCHIVE_SHA256
+ARG BUILD_DATE
+ARG TENCENT_PYPI_INDEX=https://mirrors.cloud.tencent.com/pypi/simple/
+
+LABEL org.opencontainers.image.revision="${SGLANG_REVISION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL ai.sglang.source-path="/opt/taco-sglang"
+LABEL ai.sglang.install-mode="editable"
+LABEL ai.sglang.package-version="${SGLANG_PACKAGE_VERSION}"
+LABEL ai.sglang.base-image-id="sha256:a80dbf6e9f4f376c24d5f15ee646fab35c343bead05024f829a7a6523332ce6c"
+LABEL ai.sglang.source-archive-sha256="${SOURCE_ARCHIVE_SHA256}"
+
+COPY sglang-src/ /opt/taco-sglang/
+COPY build-info.json /opt/taco-sglang/BUILD-INFO.json
+
+ENV PYTHONPATH="/opt/OpForge/python:/sgl-workspace/mori:/sgl-workspace/aiter:"
+
+RUN --mount=type=bind,source=wheels,target=/tmp/taco-build-wheels,readonly \
+    --mount=type=bind,source=cargo-config.toml,target=/root/.cargo/config.toml,readonly \
+    python3 -m pip config set global.index-url "${TENCENT_PYPI_INDEX}" \
+    && python3 -m pip uninstall -y sglang \
+    && rm -rf /sgl-workspace/sglang \
+    && rm -rf /opt/venv/lib/python3.10/site-packages/sglang-*.dist-info \
+    && rm -f /opt/venv/lib/python3.10/site-packages/__editable__.sglang-*.pth \
+        /opt/venv/lib/python3.10/site-packages/__editable___sglang_*_finder.py \
+        /opt/venv/lib/python3.10/site-packages/__pycache__/__editable___sglang_*_finder.*.pyc \
+    && python3 -m pip install --no-index --no-deps \
+        /tmp/taco-build-wheels/semantic_version-2.10.0-*.whl \
+        /tmp/taco-build-wheels/setuptools_rust-1.13.0-*.whl \
+    && SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="${SGLANG_PACKAGE_VERSION}" \
+        python3 -m pip install --no-deps --no-build-isolation --editable /opt/taco-sglang/python \
+    && python3 -m pip uninstall -y setuptools-rust semantic-version \
+    && rm -rf /opt/taco-sglang/rust/sglang-grpc/target \
+        /root/.cargo/registry/cache/mirrors.ustc.edu.cn-* \
+        /root/.cargo/registry/index/mirrors.ustc.edu.cn-* \
+        /root/.cargo/registry/src/mirrors.ustc.edu.cn-* \
+    && rm -f /root/.config/pip/pip.conf \
+    && test ! -e /sgl-workspace/sglang
+
+RUN python3 -c "import importlib.metadata, opforge, sglang; assert sglang.__file__.startswith('/opt/taco-sglang/python/'); assert opforge.__file__.startswith('/opt/OpForge/python/'); assert importlib.metadata.version('sglang') == '${SGLANG_PACKAGE_VERSION}'; print(sglang.__file__); print(opforge.__file__); print(importlib.metadata.version('sglang'))"
