@@ -1,10 +1,73 @@
-FROM ccr.ccs.tencentyun.com/taco/sglang-rocm:v0.5.14-rocm720-mi308x-dsv4pro-0716-cgfix
+# syntax=docker/dockerfile:1.7
 
-ARG SGLANG_REVISION=15b760f969d6989b605d3b00dd02d448a6571bd8
-ARG SGLANG_PACKAGE_VERSION=0.5.14.dev20260716+g15b760f969
+ARG BASE_IMAGE=ccr.ccs.tencentyun.com/taco/sglang-rocm:v0.5.14-rocm720-mi308x-dsv4pro-0716-cgfix
+
+FROM ${BASE_IMAGE} AS mooncake-builder
+
+ARG MOONCAKE_TAG=v0.3.12-pre4.1
+ARG MOONCAKE_REVISION=b87377e62150621f6550a93d0a9d397f98a8cf62
+ARG MOONCAKE_HIP_LOCALITY_FIX=af29ca7e02ef79342c8b2ee30c5b5c92136dc5ea
+ARG MOONCAKE_ENGINE_SHA256=59b4f0b10b68eef055c03450f1572a85e8a59622495381fdd8d826d8e397933f
+
+RUN set -eux; \
+    git -C /sgl-workspace/Mooncake fetch --depth=300 origin \
+        "refs/tags/${MOONCAKE_TAG}:refs/tags/${MOONCAKE_TAG}"; \
+    git -C /sgl-workspace/Mooncake worktree add --detach \
+        /tmp/mooncake-upstream "${MOONCAKE_TAG}"; \
+    test "$(git -C /tmp/mooncake-upstream rev-parse HEAD)" = "${MOONCAKE_REVISION}"; \
+    git -C /tmp/mooncake-upstream merge-base --is-ancestor \
+        "${MOONCAKE_HIP_LOCALITY_FIX}" HEAD; \
+    desired_pybind11="$(git -C /tmp/mooncake-upstream ls-tree HEAD extern/pybind11 | awk '{print $3}')"; \
+    base_pybind11="$(git -C /sgl-workspace/Mooncake/extern/pybind11 rev-parse HEAD)"; \
+    test "${desired_pybind11}" = "${base_pybind11}"; \
+    rm -rf /tmp/mooncake-upstream/extern/pybind11; \
+    mkdir -p /tmp/mooncake-upstream/extern/pybind11; \
+    cp -a /sgl-workspace/Mooncake/extern/pybind11/. \
+        /tmp/mooncake-upstream/extern/pybind11/; \
+    rm -rf /tmp/mooncake-upstream/extern/pybind11/.git; \
+    cmake -S /tmp/mooncake-upstream -B /tmp/mooncake-upstream/build \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_DEVICE_TRANSPORT_EXAMPLE=OFF \
+        -DBUILD_UNIT_TESTS=ON \
+        -DENABLE_MULTI_PROTOCOL=ON \
+        -DSTORE_USE_ETCD=OFF \
+        -DSTORE_USE_REDIS=OFF \
+        -DUSE_CUDA=OFF \
+        -DUSE_ETCD=ON \
+        -DUSE_ETCD_LEGACY=OFF \
+        -DUSE_HIP=ON \
+        -DUSE_HIP_DMABUF=ON \
+        -DUSE_REDIS=OFF \
+        -DWITH_RUST_EXAMPLE=OFF \
+        -DWITH_STORE_RUST=ON; \
+    grep -q '^ENABLE_MULTI_PROTOCOL:BOOL=ON$' \
+        /tmp/mooncake-upstream/build/CMakeCache.txt; \
+    cmake --build /tmp/mooncake-upstream/build --target engine -j8; \
+    cmake --build /tmp/mooncake-upstream/build \
+        --target multi_transport_locality_test -j8; \
+    mkdir -p /opt/mooncake-artifacts; \
+    engine="$(find /tmp/mooncake-upstream/build/mooncake-integration \
+        -maxdepth 1 -type f -name 'engine*.so' -print -quit)"; \
+    test -n "${engine}"; \
+    install -m 0755 "${engine}" /opt/mooncake-artifacts/engine.so; \
+    install -m 0755 /tmp/mooncake-upstream/build/mooncake-common/libasio.so \
+        /opt/mooncake-artifacts/libasio.so; \
+    test "$(sha256sum /opt/mooncake-artifacts/engine.so | awk '{print $1}')" = \
+        "${MOONCAKE_ENGINE_SHA256}"; \
+    grep -R -q 'isHipReachableTarget' \
+        /tmp/mooncake-upstream/mooncake-transfer-engine/src
+
+FROM ${BASE_IMAGE}
+
+ARG SGLANG_REVISION=b1760af8adf482953787ad7fc608f10dd5707615
+ARG SGLANG_PACKAGE_VERSION=0.5.14.dev20260718+gb1760af8ad
 ARG SOURCE_ARCHIVE_SHA256
 ARG BUILD_DATE
 ARG TENCENT_PYPI_INDEX=https://mirrors.cloud.tencent.com/pypi/simple/
+ARG MOONCAKE_TAG=v0.3.12-pre4.1
+ARG MOONCAKE_REVISION=b87377e62150621f6550a93d0a9d397f98a8cf62
+ARG MOONCAKE_HIP_LOCALITY_FIX=af29ca7e02ef79342c8b2ee30c5b5c92136dc5ea
+ARG MOONCAKE_ENGINE_SHA256=59b4f0b10b68eef055c03450f1572a85e8a59622495381fdd8d826d8e397933f
 
 LABEL org.opencontainers.image.revision="${SGLANG_REVISION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
@@ -13,24 +76,38 @@ LABEL ai.sglang.install-mode="editable"
 LABEL ai.sglang.package-version="${SGLANG_PACKAGE_VERSION}"
 LABEL ai.sglang.base-image-id="sha256:a80dbf6e9f4f376c24d5f15ee646fab35c343bead05024f829a7a6523332ce6c"
 LABEL ai.sglang.source-archive-sha256="${SOURCE_ARCHIVE_SHA256}"
+LABEL ai.sglang.weight-loading="builtin-async"
+LABEL ai.sglang.mooncake.version="${MOONCAKE_TAG}"
+LABEL ai.sglang.mooncake.revision="${MOONCAKE_REVISION}"
+LABEL ai.sglang.mooncake.hip-locality-fix="${MOONCAKE_HIP_LOCALITY_FIX}"
+LABEL ai.sglang.mooncake.engine.sha256="${MOONCAKE_ENGINE_SHA256}"
+LABEL ai.sglang.mooncake.multi-protocol="enabled"
 
 COPY sglang-src/ /opt/taco-sglang/
 COPY build-info.json /opt/taco-sglang/BUILD-INFO.json
 
 ENV PYTHONPATH="/opt/OpForge/python:/sgl-workspace/mori:/sgl-workspace/aiter:"
 
-RUN --mount=type=bind,source=wheels,target=/tmp/taco-build-wheels,readonly \
-    --mount=type=bind,source=cargo-config.toml,target=/root/.cargo/config.toml,readonly \
-    python3 -m pip config set global.index-url "${TENCENT_PYPI_INDEX}" \
+RUN mkdir -p /root/.cargo \
+    && printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "ustc"' \
+        '' \
+        '[source.ustc]' \
+        'registry = "https://mirrors.ustc.edu.cn/crates.io-index"' \
+        '' \
+        '[net]' \
+        'git-fetch-with-cli = true' \
+        > /root/.cargo/config.toml \
+    && python3 -m pip config set global.index-url "${TENCENT_PYPI_INDEX}" \
     && python3 -m pip uninstall -y sglang \
     && rm -rf /sgl-workspace/sglang \
     && rm -rf /opt/venv/lib/python3.10/site-packages/sglang-*.dist-info \
     && rm -f /opt/venv/lib/python3.10/site-packages/__editable__.sglang-*.pth \
         /opt/venv/lib/python3.10/site-packages/__editable___sglang_*_finder.py \
         /opt/venv/lib/python3.10/site-packages/__pycache__/__editable___sglang_*_finder.*.pyc \
-    && python3 -m pip install --no-index --no-deps \
-        /tmp/taco-build-wheels/semantic_version-2.10.0-*.whl \
-        /tmp/taco-build-wheels/setuptools_rust-1.13.0-*.whl \
+    && python3 -m pip install --no-cache-dir --no-deps \
+        semantic-version==2.10.0 setuptools-rust==1.13.0 \
     && SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="${SGLANG_PACKAGE_VERSION}" \
         python3 -m pip install --no-deps --no-build-isolation --editable /opt/taco-sglang/python \
     && python3 -m pip uninstall -y setuptools-rust semantic-version \
@@ -41,4 +118,11 @@ RUN --mount=type=bind,source=wheels,target=/tmp/taco-build-wheels,readonly \
     && rm -f /root/.config/pip/pip.conf \
     && test ! -e /sgl-workspace/sglang
 
-RUN python3 -c "import importlib.metadata, opforge, sglang; assert sglang.__file__.startswith('/opt/taco-sglang/python/'); assert opforge.__file__.startswith('/opt/OpForge/python/'); assert importlib.metadata.version('sglang') == '${SGLANG_PACKAGE_VERSION}'; print(sglang.__file__); print(opforge.__file__); print(importlib.metadata.version('sglang'))"
+COPY --from=mooncake-builder /opt/mooncake-artifacts/engine.so \
+    /opt/venv/lib/python3.10/site-packages/mooncake/engine.cpython-310-x86_64-linux-gnu.so
+COPY --from=mooncake-builder /opt/mooncake-artifacts/libasio.so \
+    /opt/venv/lib/python3.10/site-packages/mooncake/libasio.so
+
+RUN test "$(sha256sum /opt/venv/lib/python3.10/site-packages/mooncake/engine.cpython-310-x86_64-linux-gnu.so | awk '{print $1}')" = "${MOONCAKE_ENGINE_SHA256}" \
+    && python3 -c "import importlib.metadata, mooncake.engine, opforge, sglang; assert sglang.__file__.startswith('/opt/taco-sglang/python/'); assert opforge.__file__.startswith('/opt/OpForge/python/'); assert importlib.metadata.version('sglang') == '${SGLANG_PACKAGE_VERSION}'; print(sglang.__file__); print(opforge.__file__); print(mooncake.engine.__file__); print(importlib.metadata.version('sglang'))" \
+    && ! ldd /opt/venv/lib/python3.10/site-packages/mooncake/engine.cpython-310-x86_64-linux-gnu.so | grep 'not found'
