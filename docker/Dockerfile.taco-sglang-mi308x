@@ -88,8 +88,13 @@ ENV PYTHONPATH="/opt/OpForge/python:/sgl-workspace/mori:/sgl-workspace/aiter:"
 
 RUN mkdir -p /root/.cargo \
     && printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "ustc"' \
+        '' \
+        '[source.ustc]' \
+        'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' \
+        '' \
         '[net]' \
-        'offline = true' \
         'git-fetch-with-cli = true' \
         > /root/.cargo/config.toml \
     && python3 -m pip config set global.index-url "${TENCENT_PYPI_INDEX}" \
@@ -101,8 +106,7 @@ RUN mkdir -p /root/.cargo \
         /opt/venv/lib/python3.10/site-packages/__pycache__/__editable___sglang_*_finder.*.pyc \
     && python3 -m pip install --no-cache-dir --no-deps \
         semantic-version==2.10.0 setuptools-rust==1.13.0 \
-    && CARGO_NET_OFFLINE=true \
-        SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="${SGLANG_PACKAGE_VERSION}" \
+    && SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="${SGLANG_PACKAGE_VERSION}" \
         python3 -m pip install --no-deps --no-build-isolation --editable /opt/taco-sglang/python \
     && python3 -m pip uninstall -y setuptools-rust semantic-version \
     && rm -rf /opt/taco-sglang/rust/sglang-grpc/target \
