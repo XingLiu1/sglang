@@ -6,7 +6,6 @@ ARG MOONCAKE_TAG=v0.3.12-pre4.1
 ARG MOONCAKE_REVISION=b87377e62150621f6550a93d0a9d397f98a8cf62
 ARG MOONCAKE_HIP_LOCALITY_FIX=af29ca7e02ef79342c8b2ee30c5b5c92136dc5ea
 ARG MOONCAKE_SOURCE_ARCHIVE_SHA256=e9499d025c8556c3141d434600a6189ac00871ee0cf71a59f085827c6f07904f
-ARG MOONCAKE_ENGINE_SHA256=59b4f0b10b68eef055c03450f1572a85e8a59622495381fdd8d826d8e397933f
 
 COPY mooncake-src/ /tmp/mooncake-upstream/
 COPY mooncake-build-info.txt /tmp/mooncake-build-info.txt
@@ -45,8 +44,10 @@ RUN set -eux; \
     install -m 0755 "${engine}" /opt/mooncake-artifacts/engine.so; \
     install -m 0755 /tmp/mooncake-upstream/build/mooncake-common/libasio.so \
         /opt/mooncake-artifacts/libasio.so; \
-    test "$(sha256sum /opt/mooncake-artifacts/engine.so | awk '{print $1}')" = \
-        "${MOONCAKE_ENGINE_SHA256}"; \
+    engine_sha256="$(sha256sum /opt/mooncake-artifacts/engine.so | awk '{print $1}')"; \
+    printf '%s  %s\n' "${engine_sha256}" \
+        engine.cpython-310-x86_64-linux-gnu.so \
+        > /opt/mooncake-artifacts/engine.sha256; \
     grep -R -q 'isHipReachableTarget' \
         /tmp/mooncake-upstream/mooncake-transfer-engine/src
 
@@ -61,7 +62,6 @@ ARG MOONCAKE_TAG=v0.3.12-pre4.1
 ARG MOONCAKE_REVISION=b87377e62150621f6550a93d0a9d397f98a8cf62
 ARG MOONCAKE_HIP_LOCALITY_FIX=af29ca7e02ef79342c8b2ee30c5b5c92136dc5ea
 ARG MOONCAKE_SOURCE_ARCHIVE_SHA256=e9499d025c8556c3141d434600a6189ac00871ee0cf71a59f085827c6f07904f
-ARG MOONCAKE_ENGINE_SHA256=59b4f0b10b68eef055c03450f1572a85e8a59622495381fdd8d826d8e397933f
 
 LABEL org.opencontainers.image.revision="${SGLANG_REVISION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
@@ -75,7 +75,6 @@ LABEL ai.sglang.mooncake.version="${MOONCAKE_TAG}"
 LABEL ai.sglang.mooncake.revision="${MOONCAKE_REVISION}"
 LABEL ai.sglang.mooncake.hip-locality-fix="${MOONCAKE_HIP_LOCALITY_FIX}"
 LABEL ai.sglang.mooncake.source-archive-sha256="${MOONCAKE_SOURCE_ARCHIVE_SHA256}"
-LABEL ai.sglang.mooncake.engine.sha256="${MOONCAKE_ENGINE_SHA256}"
 LABEL ai.sglang.mooncake.multi-protocol="enabled"
 
 COPY sglang-src/ /opt/taco-sglang/
@@ -117,7 +116,10 @@ COPY --from=mooncake-builder /opt/mooncake-artifacts/engine.so \
     /opt/venv/lib/python3.10/site-packages/mooncake/engine.cpython-310-x86_64-linux-gnu.so
 COPY --from=mooncake-builder /opt/mooncake-artifacts/libasio.so \
     /opt/venv/lib/python3.10/site-packages/mooncake/libasio.so
+COPY --from=mooncake-builder /opt/mooncake-artifacts/engine.sha256 \
+    /opt/venv/lib/python3.10/site-packages/mooncake/MOONCAKE-ENGINE.sha256
 
-RUN test "$(sha256sum /opt/venv/lib/python3.10/site-packages/mooncake/engine.cpython-310-x86_64-linux-gnu.so | awk '{print $1}')" = "${MOONCAKE_ENGINE_SHA256}" \
+RUN cd /opt/venv/lib/python3.10/site-packages/mooncake \
+    && sha256sum -c MOONCAKE-ENGINE.sha256 \
     && python3 -c "import importlib.metadata, mooncake.engine, opforge, sglang; assert sglang.__file__.startswith('/opt/taco-sglang/python/'); assert opforge.__file__.startswith('/opt/OpForge/python/'); assert importlib.metadata.version('sglang') == '${SGLANG_PACKAGE_VERSION}'; print(sglang.__file__); print(opforge.__file__); print(mooncake.engine.__file__); print(importlib.metadata.version('sglang'))" \
     && ! ldd /opt/venv/lib/python3.10/site-packages/mooncake/engine.cpython-310-x86_64-linux-gnu.so | grep 'not found'
