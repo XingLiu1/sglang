@@ -5,24 +5,19 @@ FROM ${BASE_IMAGE} AS mooncake-builder
 ARG MOONCAKE_TAG=v0.3.12-pre4.1
 ARG MOONCAKE_REVISION=b87377e62150621f6550a93d0a9d397f98a8cf62
 ARG MOONCAKE_HIP_LOCALITY_FIX=af29ca7e02ef79342c8b2ee30c5b5c92136dc5ea
+ARG MOONCAKE_SOURCE_ARCHIVE_SHA256=e9499d025c8556c3141d434600a6189ac00871ee0cf71a59f085827c6f07904f
 ARG MOONCAKE_ENGINE_SHA256=59b4f0b10b68eef055c03450f1572a85e8a59622495381fdd8d826d8e397933f
 
+COPY mooncake-src/ /tmp/mooncake-upstream/
+COPY mooncake-build-info.txt /tmp/mooncake-build-info.txt
+
 RUN set -eux; \
-    git -C /sgl-workspace/Mooncake fetch --depth=300 origin \
-        "refs/tags/${MOONCAKE_TAG}:refs/tags/${MOONCAKE_TAG}"; \
-    git -C /sgl-workspace/Mooncake worktree add --detach \
-        /tmp/mooncake-upstream "${MOONCAKE_TAG}"; \
-    test "$(git -C /tmp/mooncake-upstream rev-parse HEAD)" = "${MOONCAKE_REVISION}"; \
-    git -C /tmp/mooncake-upstream merge-base --is-ancestor \
-        "${MOONCAKE_HIP_LOCALITY_FIX}" HEAD; \
-    desired_pybind11="$(git -C /tmp/mooncake-upstream ls-tree HEAD extern/pybind11 | awk '{print $3}')"; \
-    base_pybind11="$(git -C /sgl-workspace/Mooncake/extern/pybind11 rev-parse HEAD)"; \
-    test "${desired_pybind11}" = "${base_pybind11}"; \
-    rm -rf /tmp/mooncake-upstream/extern/pybind11; \
-    mkdir -p /tmp/mooncake-upstream/extern/pybind11; \
-    cp -a /sgl-workspace/Mooncake/extern/pybind11/. \
-        /tmp/mooncake-upstream/extern/pybind11/; \
-    rm -rf /tmp/mooncake-upstream/extern/pybind11/.git; \
+    grep -qx "tag=${MOONCAKE_TAG}" /tmp/mooncake-build-info.txt; \
+    grep -qx "revision=${MOONCAKE_REVISION}" /tmp/mooncake-build-info.txt; \
+    grep -qx "hip_locality_fix=${MOONCAKE_HIP_LOCALITY_FIX}" \
+        /tmp/mooncake-build-info.txt; \
+    grep -qx "source_archive_sha256=${MOONCAKE_SOURCE_ARCHIVE_SHA256}" \
+        /tmp/mooncake-build-info.txt; \
     cmake -S /tmp/mooncake-upstream -B /tmp/mooncake-upstream/build \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DBUILD_DEVICE_TRANSPORT_EXAMPLE=OFF \
@@ -65,6 +60,7 @@ ARG TENCENT_PYPI_INDEX=https://mirrors.cloud.tencent.com/pypi/simple/
 ARG MOONCAKE_TAG=v0.3.12-pre4.1
 ARG MOONCAKE_REVISION=b87377e62150621f6550a93d0a9d397f98a8cf62
 ARG MOONCAKE_HIP_LOCALITY_FIX=af29ca7e02ef79342c8b2ee30c5b5c92136dc5ea
+ARG MOONCAKE_SOURCE_ARCHIVE_SHA256=e9499d025c8556c3141d434600a6189ac00871ee0cf71a59f085827c6f07904f
 ARG MOONCAKE_ENGINE_SHA256=59b4f0b10b68eef055c03450f1572a85e8a59622495381fdd8d826d8e397933f
 
 LABEL org.opencontainers.image.revision="${SGLANG_REVISION}"
@@ -78,6 +74,7 @@ LABEL ai.sglang.weight-loading="builtin-async"
 LABEL ai.sglang.mooncake.version="${MOONCAKE_TAG}"
 LABEL ai.sglang.mooncake.revision="${MOONCAKE_REVISION}"
 LABEL ai.sglang.mooncake.hip-locality-fix="${MOONCAKE_HIP_LOCALITY_FIX}"
+LABEL ai.sglang.mooncake.source-archive-sha256="${MOONCAKE_SOURCE_ARCHIVE_SHA256}"
 LABEL ai.sglang.mooncake.engine.sha256="${MOONCAKE_ENGINE_SHA256}"
 LABEL ai.sglang.mooncake.multi-protocol="enabled"
 
