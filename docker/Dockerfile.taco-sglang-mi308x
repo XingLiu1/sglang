@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 ARG BASE_IMAGE=ccr.ccs.tencentyun.com/taco/sglang-rocm:v0.5.14-rocm720-mi308x-dsv4pro-0716-cgfix
 
 FROM ${BASE_IMAGE} AS mooncake-builder
