@@ -285,6 +285,16 @@ def _sparse_attn_v4_paged_prefill_triton(
     return out
 
 
+# ---- OPFORGE DSV4 SPARSE PAGED PREFILL ADAPTER ----
+try:
+    from opforge.adapter.sglang import sparse_attn_v4_paged_prefill_decorator
+except ImportError:
+
+    def sparse_attn_v4_paged_prefill_decorator(fn):
+        return fn
+
+
+@sparse_attn_v4_paged_prefill_decorator
 def sparse_attn_v4_paged_prefill(
     q: torch.Tensor,
     unified_kv: torch.Tensor,
