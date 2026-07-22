@@ -1152,23 +1152,37 @@ class FlexKVConnector:
                             f"unified_kv_triton c{ratio} page view for a layer "
                             "is not contiguous; refusing to silently clone"
                         )
-                if item_bytes != self._unified_head_bytes:
+                # ``unified_region_buffers`` returns ``item_bytes`` as the
+                # **per-page** byte stride of the reshaped view
+                # (rows_per_page * head_dim * sizeof(bf16)), i.e. equal to
+                # ``page_views[0].shape[1]`` under the uint8 recast. The
+                # downstream registration path expects ``bytes_per_token``
+                # (one row / one token slot = head_dim * sizeof(bf16)), so
+                # normalize here and validate against ``_unified_head_bytes``.
+                sub_page_size = unified_page_size // ratio
+                if item_bytes % sub_page_size != 0:
                     raise RuntimeError(
-                        f"unified c{ratio} item_bytes={item_bytes} does not "
-                        f"match head_dim*sizeof(bf16)="
-                        f"{self._unified_head_bytes}"
+                        f"unified c{ratio} item_bytes={item_bytes} not "
+                        f"divisible by sub_page_size={sub_page_size}"
+                    )
+                bytes_per_token = item_bytes // sub_page_size
+                if bytes_per_token != self._unified_head_bytes:
+                    raise RuntimeError(
+                        f"unified c{ratio} bytes_per_token={bytes_per_token} "
+                        f"(item_bytes={item_bytes} / sub_page_size="
+                        f"{sub_page_size}) does not match "
+                        f"head_dim*sizeof(bf16)={self._unified_head_bytes}"
                     )
                 # ``add_kv_group`` records ``sub_page_size = ratio-scaled
                 # page size`` (rows_per_page). ``bytes_per_token`` is one row
-                # in bytes = ``item_bytes`` (head_dim * sizeof(bf16)).
-                sub_page_size = unified_page_size // ratio
+                # in bytes = head_dim * sizeof(bf16).
                 add_kv_group(
                     f"c{ratio}",
                     ratio,
                     layer_ids,
                     page_views,
                     sub_page_size,
-                    item_bytes,
+                    bytes_per_token,
                 )
         else:
             c4_pool = getattr(kvcache, "c4_kv_pool", None)
