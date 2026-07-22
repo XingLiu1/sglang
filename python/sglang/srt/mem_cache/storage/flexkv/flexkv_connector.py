@@ -97,6 +97,43 @@ class FlexKVConnector:
     ) -> None:
         self.page_size = int(page_size)
 
+        # 1a. Detect unified_kv_triton mode by peeking at the sglang KV pool.
+        # DSv4 with unified_kv Triton exposes ``unified_kv_pool`` on the
+        # TokenToKVPool alongside (or instead of) the standalone c4/c128
+        # pools; the SWA segment lives inside the same BF16 table as the
+        # compressed segments (head_dim = 512 -> 1024 bytes/token) and the
+        # SWA ring stride is ``sliding_window + spec_extra`` rather than the
+        # standalone ``cache_config.tokens_per_block``.
+        #
+        # Publish these facts to ``sgl_model_config`` BEFORE
+        # ``post_init_from_sglang_config`` runs, so
+        # ``integration/config.py`` can build the correct ``SWAPoolConfig``
+        # (bytes_per_token_per_layer = 1024, tokens_per_block = swa_ring_size)
+        # instead of the standalone padded-585 layout.
+        unified_kv_pool = getattr(kvcache, "unified_kv_pool", None)
+        if unified_kv_pool is not None:
+            head_dim = int(getattr(unified_kv_pool, "head_dim", 0))
+            # unified pool stores in bf16 (see DeepSeekV4UnifiedKVPool).
+            head_bytes = head_dim * 2
+            ring_size = int(
+                getattr(kvcache, "unified_swa_ring_size", 0)
+            )
+            if head_dim <= 0 or ring_size <= 0:
+                raise RuntimeError(
+                    "unified_kv_pool detected but head_dim / "
+                    "unified_swa_ring_size are missing on kvcache "
+                    f"(head_dim={head_dim}, ring_size={ring_size})"
+                )
+            try:
+                sgl_model_config.is_unified_kv_triton = True
+                sgl_model_config.unified_head_bytes = head_bytes
+                sgl_model_config.unified_swa_ring_size = ring_size
+            except AttributeError:
+                # ``sgl_model_config`` may be a frozen dataclass; fall
+                # through so ``post_init_from_sglang_config`` can still
+                # discover the fields via ``getattr(..., default)``.
+                pass
+
         # 1. Resolve FlexKV config from env + sglang server args.
         self.flexkv_config = FlexKVConfig.from_env()
         self.rank_info = self.flexkv_config.post_init_from_sglang_config(
@@ -145,7 +182,80 @@ class FlexKVConnector:
         # MLA/MHA models keep the single-layout path.
         self._kvcache = kvcache
         self._swa_kv_pool = getattr(kvcache, "swa_kv_pool", None)
-        self._is_dsv4 = hasattr(kvcache, "c4_kv_pool")
+        # unified_kv_triton keeps SWA / c4 / c128 in one BF16 table on the
+        # sglang side (DeepSeekV4UnifiedKVPool). ``_is_unified_kv`` gates the
+        # zero-copy view split path in ``_resolve_kv_buffers`` /
+        # ``_register_to_server_dsv4``. Standalone (per-ratio) DSv4 keeps
+        # ``unified_kv_pool = None`` and falls through to the existing path.
+        self._unified_kv_pool = getattr(kvcache, "unified_kv_pool", None)
+        self._is_unified_kv = self._unified_kv_pool is not None
+        if self._is_unified_kv:
+            self._unified_swa_pages = int(
+                getattr(self._unified_kv_pool, "swa_pages", 0)
+            )
+            self._unified_swa_ring_size = int(
+                getattr(kvcache, "unified_swa_ring_size", 0)
+            )
+            # head_dim = qk_nope + qk_rope = 448 + 64 = 512 on DSv4; bf16.
+            self._unified_head_bytes = (
+                int(getattr(self._unified_kv_pool, "head_dim", 0)) * 2
+            )
+        else:
+            self._unified_swa_pages = 0
+            self._unified_swa_ring_size = 0
+            self._unified_head_bytes = 0
+
+        # DSv4 detection now covers unified (unified_kv_pool present) or
+        # standalone (c4_kv_pool present).
+        self._is_dsv4 = (
+            hasattr(kvcache, "c4_kv_pool") or self._is_unified_kv
+        )
+
+        # Cache the normalized swa_multi_group enum ∈ {0, 1, 2}. ``None``
+        # (unset) normalizes to 2 (full sidecar registration, the legacy
+        # default). See flexkv.common.config._normalize_swa_multi_group.
+        try:
+            from flexkv.common.config import _normalize_swa_multi_group
+            self._swa_multi_group_enum = _normalize_swa_multi_group(
+                getattr(
+                    getattr(self.flexkv_config, "user_config", None),
+                    "swa_multi_group",
+                    None,
+                )
+            )
+        except Exception:
+            # If FlexKV cannot be imported (should not happen at this
+            # point), fall back to the legacy default so behavior matches
+            # the pre-refactor connector.
+            self._swa_multi_group_enum = 2
+
+        # Early guard: the current landing scope for unified_kv_triton is
+        # ONLY ``swa_multi_group=0`` (no SWA / attention-state / indexer-
+        # state registration; GPU owns SWA entirely). Combining unified
+        # with enum ∈ {1, 2} would exercise ``_build_swa_slot_mapping``'s
+        # unified branch, whose ``translate_loc_from_full_to_swa`` return
+        # convention does not yet match the standalone ``> 0`` sentinel
+        # (0 is a legal SWA slot under unified). Fail loudly instead of
+        # silently sending a wrong slot_mapping to FlexKV.
+        if self._is_unified_kv and self._swa_multi_group_enum != 0:
+            raise NotImplementedError(
+                "unified_kv_triton currently only supports swa_multi_group=0"
+                " (no SWA / attention-state / indexer-state registration); "
+                f"got swa_multi_group={self._swa_multi_group_enum}. See "
+                "_build_swa_slot_mapping TODO for the pending sentinel-"
+                "convention fix required for unified + {1, 2}."
+            )
+
+        # Logical SWA channel: standalone SWA pool OR unified SWA segment
+        # AND ``enum != 0`` (which turns off all SWA-related I/O). This
+        # single flag replaces every ``self._swa_kv_pool is not None``
+        # gate downstream (get_match(swa_aware=...),
+        # _build_swa_slot_mapping, store/retrieve/start_load).
+        self._has_swa_channel = (
+            (self._swa_kv_pool is not None or self._is_unified_kv)
+            and self._swa_multi_group_enum != 0
+        )
+
         self._dsv4_layer_groups: List[Dict[str, Any]] = []
         self._dsv4_state_groups: List[Dict[str, Any]] = []
         kv_caches, indexer_buffers = self._resolve_kv_buffers(kvcache)
@@ -238,10 +348,13 @@ class FlexKVConnector:
         )
 
         logger.info(
-            "[FlexKV] Connector ready %s: layerwise=%s, prefetch=%s",
+            "[FlexKV] Connector ready %s: layerwise=%s, prefetch=%s, "
+            "unified_kv=%s, swa_multi_group=%d",
             self._label,
             self.enable_layerwise,
             self._prefetch_enabled,
+            self._is_unified_kv,
+            self._swa_multi_group_enum,
         )
 
     # ------------------------------------------------------------------
@@ -278,11 +391,14 @@ class FlexKVConnector:
             mask_np = self._as_numpy_mask(token_mask)
             try:
                 # A DSv4 prefix is reusable only when the same host node also
-                # owns its SWA window and compress-state sidecars.
+                # owns its SWA window and compress-state sidecars. Under
+                # unified_kv_triton with ``swa_multi_group=0``, the SWA
+                # channel is intentionally absent and we fall back to the
+                # plain (SWA-unaware) match path.
                 res = self.kv_manager.get_match(
                     token_ids=tids_np,
                     token_mask=mask_np,
-                    swa_aware=self._swa_kv_pool is not None,
+                    swa_aware=self._has_swa_channel,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[FlexKV] get_match raised: %s", exc)
@@ -976,10 +1092,11 @@ class FlexKVConnector:
             )
 
         if getattr(kvcache, "_unified_kv", False):
-            raise NotImplementedError(
-                "FlexKV DSv4 integration currently requires the split "
-                "c4/c128/SWA GPU layout; unified_kv is not supported yet."
-            )
+            if not self._is_unified_kv:
+                raise RuntimeError(
+                    "DSv4 kvcache marked _unified_kv=True but unified_kv_pool "
+                    "was not detected during connector init"
+                )
 
         compression_ratios = list(kvcache.compression_ratios)
         stage_start = int(getattr(kvcache, "_stage_start", 0))
@@ -1017,27 +1134,66 @@ class FlexKVConnector:
                     }
                 )
 
-        c4_pool = getattr(kvcache, "c4_kv_pool", None)
-        c128_pool = getattr(kvcache, "c128_kv_pool", None)
-        if c4_pool is not None:
-            add_kv_group(
-                "c4",
-                4,
-                c4_layer_ids,
-                c4_pool.kv_buffer,
-                c4_pool.page_size,
-                c4_pool.get_bytes_per_token(),
-            )
-        if c128_pool is not None:
-            add_kv_group(
-                "c128",
-                128,
-                c128_layer_ids,
-                c128_pool.kv_buffer,
-                c128_pool.page_size,
-                c128_pool.get_bytes_per_token(),
-            )
+        if self._is_unified_kv:
+            # unified_kv_triton: main c4 / c128 KV live in the same BF16 table
+            # as SWA. We ask the sglang pool for zero-copy views over the
+            # compressed segment (rows >= swa_pages) reshaped page-first, and
+            # register them as the c4 / c128 groups. Per-token byte width is
+            # ``head_dim * sizeof(bf16) = 1024``, NOT the standalone padded
+            # 585 value.
+            unified_page_size = int(getattr(kvcache, "page_size", self.page_size))
+            for ratio, layer_ids in ((4, c4_layer_ids), (128, c128_layer_ids)):
+                if not layer_ids:
+                    continue
+                page_views, item_bytes = kvcache.unified_region_buffers(ratio)
+                for v in page_views:
+                    if not v.is_contiguous():
+                        raise RuntimeError(
+                            f"unified_kv_triton c{ratio} page view for a layer "
+                            "is not contiguous; refusing to silently clone"
+                        )
+                if item_bytes != self._unified_head_bytes:
+                    raise RuntimeError(
+                        f"unified c{ratio} item_bytes={item_bytes} does not "
+                        f"match head_dim*sizeof(bf16)="
+                        f"{self._unified_head_bytes}"
+                    )
+                # ``add_kv_group`` records ``sub_page_size = ratio-scaled
+                # page size`` (rows_per_page). ``bytes_per_token`` is one row
+                # in bytes = ``item_bytes`` (head_dim * sizeof(bf16)).
+                sub_page_size = unified_page_size // ratio
+                add_kv_group(
+                    f"c{ratio}",
+                    ratio,
+                    layer_ids,
+                    page_views,
+                    sub_page_size,
+                    item_bytes,
+                )
+        else:
+            c4_pool = getattr(kvcache, "c4_kv_pool", None)
+            c128_pool = getattr(kvcache, "c128_kv_pool", None)
+            if c4_pool is not None:
+                add_kv_group(
+                    "c4",
+                    4,
+                    c4_layer_ids,
+                    c4_pool.kv_buffer,
+                    c4_pool.page_size,
+                    c4_pool.get_bytes_per_token(),
+                )
+            if c128_pool is not None:
+                add_kv_group(
+                    "c128",
+                    128,
+                    c128_layer_ids,
+                    c128_pool.kv_buffer,
+                    c128_pool.page_size,
+                    c128_pool.get_bytes_per_token(),
+                )
 
+        # ``c4_indexer`` (uint8 sidecar) is stored in a dedicated pool in both
+        # unified and standalone modes, so its byte-width path is identical.
         indexer_pool = getattr(kvcache, "c4_indexer_kv_pool", None)
         dsv4_indexer_buffers = (
             list(getattr(indexer_pool, "index_k_with_scale_buffer", []))
@@ -1055,15 +1211,13 @@ class FlexKVConnector:
                 sample.shape[1] // indexer_pool.page_size,
             )
 
-        # Compress states share the SWA physical-page mapping. The FlexKV
-        # user option is intentionally tri-state: omitted/None enables the
-        # correctness-preserving default; explicit false keeps SWA-only I/O.
-        swa_multi_group = getattr(
-            getattr(self.flexkv_config, "user_config", None),
-            "swa_multi_group",
-            None,
-        )
-        if swa_multi_group is not False:
+        # Compress-state sidecars are dispatched by the normalized
+        # ``swa_multi_group`` enum:
+        #   2 -> register c4_attention_state + c4_indexer_state (default).
+        #   1 -> only SWA KV registered upstream; skip sidecars here.
+        #   0 -> nothing SWA-related registered at all.
+        mg_enum = self._swa_multi_group_enum
+        if mg_enum == 2:
             self._append_dsv4_state_group(
                 "c4_attention_state",
                 c4_layer_ids,
@@ -1074,10 +1228,19 @@ class FlexKVConnector:
                 c4_layer_ids,
                 [kvcache.indexer_compress_state_pools[i] for i in c4_global_layer_ids],
             )
-        else:
             logger.info(
-                "[FlexKV-DSv4] swa_multi_group=false; registering SWA without "
+                "[FlexKV-DSv4] swa_multi_group=2; SWA + attention-state + "
+                "indexer-state all registered"
+            )
+        elif mg_enum == 1:
+            logger.info(
+                "[FlexKV-DSv4] swa_multi_group=1; registering SWA without "
                 "compress-state sidecars"
+            )
+        else:  # mg_enum == 0
+            logger.info(
+                "[FlexKV-DSv4] swa_multi_group=0; SWA / attention-state / "
+                "indexer-state all disabled"
             )
 
         if self._dsv4_state_groups:
@@ -1239,8 +1402,35 @@ class FlexKVConnector:
         self, full_indices: torch.Tensor
     ) -> Optional[torch.Tensor]:
         """Translate full-pool indices and keep only the mapped SWA tail."""
-        if self._swa_kv_pool is None:
+        # Logical SWA channel gate: covers both ``self._swa_kv_pool is None``
+        # (standalone without SWA) and ``swa_multi_group == 0`` (SWA I/O
+        # explicitly disabled, including all currently-supported unified_kv
+        # scenarios).
+        if not self._has_swa_channel:
             return None
+        if self._is_unified_kv:
+            # TODO(unified_kv_triton + swa_multi_group != 0):
+            #   unified pools expose ``translate_loc_from_full_to_swa``, but
+            #   its return convention is not fully aligned with the
+            #   standalone one:
+            #     - standalone reserves slot ``0`` as the null slot, so
+            #       the ``> 0`` mask below correctly filters unmapped
+            #       positions;
+            #     - unified returns SWA-ring row ids in
+            #       ``[0, num_slots * ring_stride)`` where ``0`` is a
+            #       legal slot, breaking the sentinel test.
+            #   The current landing scope only enables unified with
+            #   ``swa_multi_group == 0`` (the early guard in __init__
+            #   rejects the other combinations), so control never
+            #   reaches here. When unified + {1, 2} is added, this
+            #   branch must adopt an explicit valid-mask (or ``-1``
+            #   sentinel) instead of ``> 0``.
+            raise NotImplementedError(
+                "unified_kv_triton SWA slot mapping is not implemented; "
+                "combining unified_kv with swa_multi_group != 0 is "
+                "currently rejected in __init__ (see the TODO in "
+                "_build_swa_slot_mapping for the pending fix)."
+            )
         translate = getattr(self._kvcache, "translate_loc_from_full_to_swa", None)
         if translate is None:
             return None
@@ -1449,16 +1639,74 @@ class FlexKVConnector:
         swa_layer_groups = None
         swa_gpu_layouts = None
         swa_handles_per_group = None
-        swa_pool = self._swa_kv_pool
-        swa_buffers = list(getattr(swa_pool, "kv_buffer", []))
+
+        # ``enum == 0`` short-circuits the SWA channel entirely: keep every
+        # ``swa_*`` parameter at ``None`` so ``KVTPClient.register_to_server``
+        # never wires SWA GPU handles and the C++ ``LayerwiseTransferGroup``
+        # falls through to ``has_swa_ = false``.
+        if self._swa_multi_group_enum == 0:
+            swa_buffers: List[torch.Tensor] = []
+        elif self._is_unified_kv:
+            # unified_kv_triton: SWA rows [0, swa_pages) live inside the same
+            # BF16 table as c4/c128. Build a per-layer 2D view reshaped into
+            # (num_slots, ring_stride * head_bytes) so FlexKV sees the SWA
+            # ring as pages of ``ring_stride`` tokens. head_size below is
+            # ``head_dim * sizeof(bf16) = 1024``.
+            unified_pool = self._unified_kv_pool
+            swa_pages = self._unified_swa_pages
+            ring_stride = self._unified_swa_ring_size
+            head_bytes = self._unified_head_bytes
+            if swa_pages <= 0 or ring_stride <= 0 or head_bytes <= 0:
+                raise RuntimeError(
+                    "unified_kv_triton SWA registration requires positive "
+                    f"swa_pages={swa_pages}, ring_stride={ring_stride}, "
+                    f"head_bytes={head_bytes}"
+                )
+            if swa_pages % ring_stride != 0:
+                raise RuntimeError(
+                    f"unified swa_pages={swa_pages} is not a multiple of "
+                    f"ring_stride={ring_stride}; SWA ring geometry is broken"
+                )
+            num_slots = swa_pages // ring_stride
+            swa_buffers = []
+            for buf in unified_pool.kv_buffer:
+                v = buf[:swa_pages]
+                if not v.is_contiguous():
+                    raise RuntimeError(
+                        "unified_kv_triton SWA row-slice view is not "
+                        "contiguous; refusing to silently clone"
+                    )
+                v = v.view(torch.uint8).reshape(num_slots, ring_stride * head_bytes)
+                if not v.is_contiguous():
+                    raise RuntimeError(
+                        "unified_kv_triton SWA reshaped view is not "
+                        "contiguous; refusing to silently clone"
+                    )
+                swa_buffers.append(v)
+        else:
+            swa_pool = self._swa_kv_pool
+            swa_buffers = list(getattr(swa_pool, "kv_buffer", []))
+
         if swa_buffers:
             sample = swa_buffers[0]
-            sub_page_size = int(swa_pool.page_size)
-            if sample.ndim != 2 or sample.shape[1] % sub_page_size != 0:
-                raise RuntimeError(
-                    "FlexKV DSv4 SWA buffers must be 2D with a page-aligned stride"
-                )
-            head_size = sample.shape[1] // sub_page_size
+            if self._is_unified_kv:
+                # Under unified we already reshaped the view above; layout is
+                # explicit rather than derived from ``page_size``.
+                sub_page_size = self._unified_swa_ring_size
+                head_size = self._unified_head_bytes
+                if sample.ndim != 2 or sample.shape[1] != sub_page_size * head_size:
+                    raise RuntimeError(
+                        f"unified_kv_triton SWA view shape={tuple(sample.shape)}"
+                        f" does not match ring_stride*head_bytes="
+                        f"{sub_page_size * head_size}"
+                    )
+            else:
+                sub_page_size = int(self._swa_kv_pool.page_size)
+                if sample.ndim != 2 or sample.shape[1] % sub_page_size != 0:
+                    raise RuntimeError(
+                        "FlexKV DSv4 SWA buffers must be 2D with a page-aligned stride"
+                    )
+                head_size = sample.shape[1] // sub_page_size
             swa_layout = KVCacheLayout(
                 type=KVCacheLayoutType.LAYERFIRST,
                 num_layer=len(swa_buffers),

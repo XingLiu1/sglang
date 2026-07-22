@@ -331,10 +331,29 @@ Supported:
   `server_args.dist_init_addr`'s host.
 * `FLEXKV_KV_CACHE_DTYPE` — override KV dtype when sglang uses
   `--kv-cache-dtype auto`.
-* `swa_multi_group` (FlexKV config file) — omitted or `true` stores and
-  restores DeepSeek V4 SWA KV together with the C4 attention/indexer
-  compress states. Explicit `false` keeps SWA KV I/O but disables the
-  state sidecars.
+* `swa_multi_group` (FlexKV config file / `FLEXKV_SWA_MULTI_GROUP` env)
+  — DeepSeek-V4 SWA sidecar policy. **Breaking change**: this used to be
+  a bool, it is now a tri-state int enum in `{0, 1, 2}` (unset /
+  `null` normalizes to `2`). Meaning:
+  * `0` — do not register any SWA-related group (no SWA KV, no
+    attention state, no indexer state). Use this in unified_kv_triton
+    mode where the GPU owns SWA entirely, or for A/B tests that skip
+    FlexKV SWA I/O. FlexKV then serves the main c4 / c128 / c4_indexer
+    prefix cache only.
+  * `1` — register SWA KV only, skip the attention/indexer compress-
+    state sidecars (equivalent to the old `false`).
+  * `2` — register SWA + attention state + indexer state (equivalent
+    to the old `true`; the default when unset).
+
+  Legacy `true` / `false` values are rejected at startup with a
+  migration hint (`true -> 2`, `false -> 1`).
+
+  **unified_kv_triton scope note**: the current sglang connector only
+  supports `unified_kv_pool` in combination with `swa_multi_group=0`.
+  Combining unified with `{1, 2}` triggers a `NotImplementedError` in
+  `FlexKVConnector.__init__` (see the TODO in `_build_swa_slot_mapping`
+  about the pending `translate_loc_from_full_to_swa` sentinel-
+  convention fix).
 * `SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK` — bypass the prebuilt
   `sglang-kernel` version assertion (not FlexKV-specific).
 
