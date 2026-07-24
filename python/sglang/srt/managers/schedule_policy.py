@@ -1081,6 +1081,7 @@ class PrefillAdder:
             # H2D. A request rejected after that point remains in waiting_queue;
             # its next prefix match overwrites req.prefix_indices and used to
             # orphan the restored slots.
+            chunk_tokens_limit = self.rem_chunk_tokens
             projected_prefix_len = prefix_len + req.host_hit_length
             projected_input_tokens = self.ceil_paged_tokens(
                 len(req.full_untruncated_fill_ids) - projected_prefix_len
