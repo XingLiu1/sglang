@@ -1701,10 +1701,20 @@ class Scheduler(
             self.external_corpus_manager.check_pending_load()
 
     def init_profiler(self) -> None:
+        def _notify_flexkv_cuda_profiler(enable: bool) -> None:
+            connector = getattr(self.tree_cache, "flexkv_connector", None)
+            if connector is None:
+                return
+            if enable:
+                connector.start_cuda_profiler()
+            else:
+                connector.stop_cuda_profiler()
+
         self.profiler_manager = SchedulerProfilerManager(
             ps=self.ps,
             dp_tp_cpu_group=self.dp_tp_cpu_group,
             get_forward_ct=lambda: self.forward_ct,
+            notify_flexkv_cuda_profiler=_notify_flexkv_cuda_profiler,
         )
 
     def init_weight_updater(self) -> None:

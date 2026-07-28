@@ -52,6 +52,8 @@ class SchedulerProfilerManager:
     ps: Any
     dp_tp_cpu_group: Any
     get_forward_ct: Callable[[], int]
+    # Optional: notify FlexKV transfer workers for Nsight cudaProfilerApi range.
+    notify_flexkv_cuda_profiler: Optional[Callable[[bool], None]] = None
 
     def __post_init__(self) -> None:
         if envs.SGLANG_PROFILE_V2.get():
@@ -257,9 +259,19 @@ class SchedulerProfilerManager:
         if "CUDA_PROFILER" in activities:
             if self.ps.gpu_id == get_server_args().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStart()
+            self._notify_flexkv_cuda_profiler(True)
             self.profile_in_progress = True
 
         return ProfileReqOutput(success=True, message="Succeeded")
+
+    def _notify_flexkv_cuda_profiler(self, enable: bool) -> None:
+        cb = self.notify_flexkv_cuda_profiler
+        if cb is None:
+            return
+        try:
+            cb(enable)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("FlexKV cuda profiler notify(enable=%s) failed: %s", enable, e)
 
     def _merge_profile_traces(self) -> str:
         if not self.merge_profiles:
@@ -367,6 +379,7 @@ class SchedulerProfilerManager:
         if "CUDA_PROFILER" in self.profiler_activities:
             if self.ps.gpu_id == get_server_args().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStop()
+            self._notify_flexkv_cuda_profiler(False)
 
         merge_message = self._merge_profile_traces()
 

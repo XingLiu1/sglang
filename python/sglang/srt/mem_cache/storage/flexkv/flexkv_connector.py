@@ -1471,6 +1471,26 @@ class FlexKVConnector:
         getattr(self, "_inflight_store_contexts", {}).clear()
         if self.layer_done_counter is not None:
             self.layer_done_counter.reset()
+            
+    def start_cuda_profiler(self) -> None:
+        """Ask FlexKV transfer workers to cudaProfilerStart (Nsight range)."""
+        self._set_cuda_profiler(True)
+
+    def stop_cuda_profiler(self) -> None:
+        """Ask FlexKV transfer workers to cudaProfilerStop (Nsight range)."""
+        self._set_cuda_profiler(False)
+
+    def _set_cuda_profiler(self, enable: bool) -> None:
+        if not self._sync_ctx.is_sync_leader or self.kv_manager is None:
+            return
+        try:
+            print(
+                f"[FLEXKV] connector cuda_profiler enable={enable} {self._label}",
+                flush=True,
+            )
+            self.kv_manager.set_cuda_profiler(enable)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[FlexKV] set_cuda_profiler(%s): %s", enable, exc)
 
     def shutdown(self) -> None:
         """Idempotent: unpin FlexKV CPU host buffers via kv_manager.shutdown()."""
