@@ -46,7 +46,7 @@ class AddReqResult(Enum):
     NO_TOKEN = auto()
 
 
-def _scheduler_case(*, chunked=False):
+def _scheduler_case(*, chunked=False, flexkv=False, defer_shared=None):
     req = SimpleNamespace(
         rid="restore",
         init_next_round_input=MagicMock(),
@@ -55,7 +55,14 @@ def _scheduler_case(*, chunked=False):
         kv=SimpleNamespace(holds_mamba=False),
     )
     leased = {req.rid}
-    cache = SimpleNamespace(has_uncommitted_restore=lambda r: r.rid in leased)
+    cache = SimpleNamespace(
+        has_uncommitted_restore=lambda r: r.rid in leased,
+        check_hicache_events=MagicMock(),
+        check_prefetch_progress=MagicMock(return_value=True),
+        pop_prefetch_loaded_span=MagicMock(return_value=(0, None)),
+    )
+    if defer_shared is not None:
+        cache.should_defer_shared_restore = defer_shared
     adder = SimpleNamespace(
         can_run_list=[],
         add_one_req=MagicMock(return_value=AddReqResult.OTHER),
@@ -88,7 +95,7 @@ def _scheduler_case(*, chunked=False):
         enable_lora=False,
         req_to_token_pool=SimpleNamespace(mamba_allocator=None),
         enable_hicache_storage=False,
-        enable_flexkv=False,
+        enable_flexkv=flexkv,
         disaggregation_mode=None,
         truncation_align_size=None,
     )
@@ -98,15 +105,24 @@ def _scheduler_case(*, chunked=False):
         "_get_new_batch_prefill_raw",
         {
             "PrefillAdder": lambda *_args, **_kwargs: adder,
-            "get_memory": lambda: SimpleNamespace(enable_flexkv=False),
+            "get_memory": lambda: SimpleNamespace(enable_flexkv=flexkv),
             "get_schedule": lambda: SimpleNamespace(prefill_max_requests=None),
             "TEST_RETRACT": False,
             "AddReqResult": AddReqResult,
             "DisaggregationMode": SimpleNamespace(PREFILL="prefill"),
         },
     )
-    running = SimpleNamespace(reqs=[], batch_is_full=False)
+    running = SimpleNamespace(reqs=[], batch_is_full=False, is_empty=lambda: True)
     return req, leased, adder, lambda: run(scheduler, None, running)
+
+
+def test_idle_flexkv_retries_admission_after_no_token():
+    _, leased, adder, run = _scheduler_case(flexkv=True)
+    leased.clear()
+    adder.add_one_req.side_effect = [AddReqResult.NO_TOKEN, AddReqResult.OTHER]
+    run()
+    run()
+    assert adder.add_one_req.call_count == 2
 
 
 @pytest.mark.parametrize("chunked", [False, True])
@@ -137,6 +153,29 @@ def test_admission_cannot_reject_after_allocating_restore_slots():
     with pytest.raises(RuntimeError, match="rejected after storage load-back"):
         run()
     assert req.rid in leased
+
+
+def test_lease_guard_and_shared_restore_deferral_run_at_distinct_stages():
+    defer_shared = MagicMock(return_value=True)
+    req, leased, adder, run = _scheduler_case(defer_shared=defer_shared)
+    # A producer with its own lease must not rematch or enter duplicate deferral.
+    run()
+    req.init_next_round_input.assert_not_called()
+    defer_shared.assert_not_called()
+    adder.add_one_req.assert_not_called()
+
+    # A waiter with no lease rematches, then defers before allocation/admission.
+    leased.clear()
+    for _ in range(3):
+        run()
+    assert req.init_next_round_input.call_count == 3
+    assert defer_shared.call_count == 3
+    adder.add_one_req.assert_not_called()
+
+    # Once publication/abort clears the shared-prefix marker, admission resumes.
+    defer_shared.return_value = False
+    run()
+    adder.add_one_req.assert_called_once()
 
 
 @pytest.mark.parametrize("cache_aware", [False, True])

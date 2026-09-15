@@ -3847,6 +3847,11 @@ class Scheduler(
                     req.host_hit_is_storage = False
 
             req.init_next_round_input(self.tree_cache)
+            defer_restore = getattr(
+                self.tree_cache, "should_defer_shared_restore", None
+            )
+            if defer_restore is not None and defer_restore(req):
+                continue
             if (
                 self.enable_hicache_storage
                 and get_memory().hicache_host_memory_mode == "buffer_only"
@@ -3886,7 +3891,7 @@ class Scheduler(
                 if res == AddReqResult.NO_TOKEN:
                     if (
                         self.enable_hierarchical_cache
-                        or self.enable_flexkv
+                        or get_memory().enable_flexkv
                         or self.enable_unified_cache_external_linker
                     ):
                         # An idle FlexKV batch must retry when host-cache pressure
