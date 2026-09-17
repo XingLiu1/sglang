@@ -781,6 +781,29 @@ class TestLoadBalanceMethod(unittest.TestCase):
             str(context.exception),
         )
 
+    def test_pd_decode_flexkv_implies_decode_radix_cache(self):
+        server_args = self._load_balance_args(
+            disaggregation_mode="decode",
+            disaggregation_transfer_backend="nixl",
+            enable_flexkv=True,
+        )
+
+        self.assertTrue(
+            resolution_result(server_args, "disaggregation_decode_enable_radix_cache")
+        )
+        self.assertFalse(resolution_result(server_args, "disable_radix_cache"))
+
+    def test_pd_decode_without_flexkv_keeps_chunk_cache(self):
+        server_args = self._load_balance_args(
+            disaggregation_mode="decode",
+            disaggregation_transfer_backend="nixl",
+        )
+
+        self.assertFalse(
+            resolution_result(server_args, "disaggregation_decode_enable_radix_cache")
+        )
+        self.assertTrue(resolution_result(server_args, "disable_radix_cache"))
+
     def test_pd_decode_radix_cache_allows_mooncake_tcp(self):
         server_args = self._load_balance_args(
             disaggregation_mode="decode",
