@@ -136,9 +136,7 @@ class FlexKVRadixCache(RadixCache):
     ) -> None:
         super().__init__(params)
 
-        # PD decode: no restore path exists on the decode scheduler, so host
-        # lookups are skipped and only the device tree is matched (see
-        # FlexKVHybridRadixCache for the full reasoning). Stores still run.
+        # PD decode has no FlexKV restore path: skip host lookups, keep storing.
         self._pd_decode = get_disagg().disaggregation_mode == "decode"
 
         kvcache = self.token_to_kv_pool_allocator.get_kvcache()

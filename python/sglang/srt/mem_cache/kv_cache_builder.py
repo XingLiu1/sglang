@@ -257,10 +257,7 @@ def build_kv_cache(
         and get_disagg().disaggregation_mode == "decode"
     ):
         if is_hybrid_swa:
-            # FlexKV always wraps the unified tree (FlexKVHybridRadixCache), and
-            # on DeepSeek-V4 it answers every decode-side match with the empty
-            # prefix, so the tree only anchors inserts and FlexKV stores; the
-            # unified-tree and DSv4 restrictions below do not apply to it.
+            # FlexKV wraps the unified tree; on DSv4 it never matches on decode.
             flexkv_on_unified_tree = get_memory().enable_flexkv
             is_dsv4 = bool(getattr(model_config, "is_deepseek_v4_arch", False))
             if not (

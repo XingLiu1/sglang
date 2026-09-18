@@ -99,8 +99,7 @@ def test_scheduler_hook_polls_cross_rank_store_completion():
 
 
 def test_pd_decode_match_prefix_reports_device_hits_only():
-    """A decode server has no FlexKV restore path, so match_prefix must not
-    promise prefill a host hit that would never be filled."""
+    """Decode has no FlexKV restore path, so match_prefix must not report host hits."""
     node = object()
     inner_match = MatchResult(
         device_indices=torch.tensor([10, 11, 12, 13], dtype=torch.int64),
@@ -141,8 +140,7 @@ def test_pd_decode_match_prefix_reports_device_hits_only():
 
 
 def test_pd_decode_store_only_answers_every_match_with_the_empty_prefix():
-    """DeepSeek-V4 decode: the tree anchors inserts and FlexKV stores only, so a
-    match must never let prefill skip part of the prompt."""
+    """DSv4 decode is store-only: a match must never let prefill skip prompt tokens."""
     inner = MagicMock()
     empty = object()
     inner.match_prefix.return_value = empty

@@ -77,11 +77,7 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
     if cfg.disaggregation_mode == "decode":
         decode_radix_cache = cfg.disaggregation_decode_enable_radix_cache
         if cfg.enable_flexkv and not decode_radix_cache:
-            # FlexKV stores through the radix tree: cache_unfinished_req /
-            # cache_finished_req resolve the page-aligned prefix against the
-            # tree before the D2H write, so a chunk cache would leave FlexKV
-            # with nothing to store. A decode instance with --enable-flexkv
-            # therefore needs the decode radix cache.
+            # FlexKV stores via the radix tree, so decode needs it.
             declare_resolution(
                 server_args,
                 "handle_pd_disaggregation",

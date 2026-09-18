@@ -102,22 +102,9 @@ class FlexKVHybridRadixCache(BasePrefixCache):
         self.page_size = inner_cache.page_size
         self.disable = inner_cache.disable
         self.device = inner_cache.device
-        # PD decode: the prompt KV arrives from the prefill node over the
-        # disaggregation transfer, and the decode scheduler has no path that
-        # restores a FlexKV host hit into request-owned slots (the HiCache
-        # restore mixin is not wired for FlexKV). match_prefix therefore
-        # reports device hits only, so a host hit is never promised to prefill
-        # as part of decode_prefix_len and then left unfilled. Stores still
-        # run: the transferred prompt at prebuilt time and the full sequence
-        # when the request finishes.
+        # PD decode has no FlexKV restore path: report device hits only, keep storing.
         self._pd_decode = get_disagg().disaggregation_mode == "decode"
-        # DeepSeek-V4's compressed KV (c4/c128/indexer) is moved per request by
-        # the PD transfer and is not tracked by the radix tree, so a decode-side
-        # device match would make prefill skip tokens whose compressed KV never
-        # arrives; upstream rejects the decode radix cache for DSv4 for that
-        # reason. FlexKV still needs the tree for its stores, so on a DSv4
-        # decode server every match is answered with the empty prefix: prefill
-        # transfers the whole prompt and the tree only anchors inserts.
+        # DSv4 compressed KV is not in the tree: decode matches get the empty prefix.
         self._pd_decode_store_only = self._pd_decode and bool(
             getattr(model_config, "is_deepseek_v4_arch", False)
         )

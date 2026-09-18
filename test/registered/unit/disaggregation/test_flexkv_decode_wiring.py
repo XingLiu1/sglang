@@ -1,5 +1,4 @@
-"""FlexKV on a PD decode server: the scheduler hook that drains FlexKV stores
-runs from the decode loop, and the non-hybrid cache skips host lookups."""
+"""FlexKV on a PD decode server: store draining in the decode loop, no host lookups."""
 
 import importlib.util
 import sys
