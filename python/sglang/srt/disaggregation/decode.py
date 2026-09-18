@@ -2700,7 +2700,8 @@ class SchedulerDisaggregationDecodeMixin:
 
     @scheduler_stage_method(SCHEDULER_STAGE_PROCESS_QUEUE)
     def process_decode_queue(self: Scheduler):
-        if self.enable_decode_hicache:
+        if self.enable_decode_hicache or self.enable_flexkv:
+            # FlexKV: drain finished stores and their radix locks on every TP rank.
             self.tree_cache.check_hicache_events()
 
         if get_disagg().disaggregation_decode_enable_offload_kvcache:

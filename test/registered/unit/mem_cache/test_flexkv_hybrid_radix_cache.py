@@ -98,6 +98,89 @@ def test_scheduler_hook_polls_cross_rank_store_completion():
     connector.drain_launched_loads.assert_called_once_with()
 
 
+def test_pd_decode_match_prefix_reports_device_hits_only():
+    """Decode has no FlexKV restore path, so match_prefix must not report host hits."""
+    node = object()
+    inner_match = MatchResult(
+        device_indices=torch.tensor([10, 11, 12, 13], dtype=torch.int64),
+        last_device_node=node,
+        last_host_node=node,
+        best_match_node=node,
+    )
+    inner = MagicMock()
+    inner.match_prefix.return_value = inner_match
+    connector = MagicMock()
+    connector.lookup_kv.return_value = (7, 4)
+
+    cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)
+    cache._inner_cache = inner
+    cache.flexkv_connector = connector
+    cache.disable = False
+    cache.page_size = 4
+    cache._load_markers = {}
+    cache._restore_leases = {}
+    cache._pd_decode = True
+
+    req = SimpleNamespace(rid="request", kv=SimpleNamespace(cache_protected_len=0))
+    params = MatchPrefixParams(
+        key=RadixKey(array("q", range(8)), extra_key=None), req=req
+    )
+
+    assert cache.match_prefix(params) is inner_match
+    inner.match_prefix.assert_called_once_with(params)
+    connector.lookup_kv.assert_not_called()
+    assert req.rid not in cache._load_markers
+
+    # The same request on a non-decode server consults FlexKV.
+    cache._pd_decode = False
+    result = cache.match_prefix(params)
+    connector.lookup_kv.assert_called_once()
+    assert result.host_hit_length == 4
+    assert req.rid in cache._load_markers
+
+
+def test_pd_decode_store_only_answers_every_match_with_the_empty_prefix():
+    """DSv4 decode is store-only: a match must never let prefill skip prompt tokens."""
+    inner = MagicMock()
+    empty = object()
+    inner.match_prefix.return_value = empty
+    connector = MagicMock()
+
+    cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)
+    cache._inner_cache = inner
+    cache.flexkv_connector = connector
+    cache.disable = False
+    cache.page_size = 4
+    cache._load_markers = {}
+    cache._restore_leases = {}
+    cache._pd_decode = True
+    cache._pd_decode_store_only = True
+
+    req = SimpleNamespace(rid="request")
+    params = MatchPrefixParams(
+        key=RadixKey(array("q", range(8)), extra_key="salt"), req=req, cow_mamba=True
+    )
+
+    assert cache.match_prefix(params) is empty
+    (inner_params,), _ = inner.match_prefix.call_args
+    assert len(inner_params.key) == 0
+    assert inner_params.key.extra_key == "salt"
+    assert inner_params.req is req
+    assert inner_params.cow_mamba is True
+    connector.lookup_kv.assert_not_called()
+
+
+def test_dec_lock_ref_forwards_skip_swa_to_inner_cache():
+    inner = MagicMock()
+    cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)
+    cache._inner_cache = inner
+    node, params = object(), object()
+
+    cache.dec_lock_ref(node, params, skip_swa=True)
+
+    inner.dec_lock_ref.assert_called_once_with(node, params, skip_swa=True)
+
+
 def test_restored_swa_tail_marks_older_prefix_as_evicted_before_cache_insert():
     inner = MagicMock()
     cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)

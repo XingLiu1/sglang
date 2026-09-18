@@ -257,7 +257,14 @@ def build_kv_cache(
         and get_disagg().disaggregation_mode == "decode"
     ):
         if is_hybrid_swa:
-            if not (envs.SGLANG_ENABLE_UNIFIED_RADIX_TREE.get() or use_mlx()):
+            # FlexKV wraps the unified tree; on DSv4 it never matches on decode.
+            flexkv_on_unified_tree = get_memory().enable_flexkv
+            is_dsv4 = bool(getattr(model_config, "is_deepseek_v4_arch", False))
+            if not (
+                envs.SGLANG_ENABLE_UNIFIED_RADIX_TREE.get()
+                or use_mlx()
+                or flexkv_on_unified_tree
+            ):
                 raise ValueError(
                     "--disaggregation-decode-enable-radix-cache with sliding "
                     "window attention (SWA) models requires the unified radix "
@@ -270,10 +277,16 @@ def build_kv_cache(
                     "device-resident cache and is incompatible with "
                     "--enable-hierarchical-cache."
                 )
-            if getattr(model_config, "is_deepseek_v4_arch", False):
+            if is_dsv4 and not flexkv_on_unified_tree:
                 raise ValueError(
                     "--disaggregation-decode-enable-radix-cache does not support "
                     "DeepSeek-V4 (DSA) compressed KV (c4/c128/indexer) yet."
+                )
+            if is_dsv4:
+                logger.warning(
+                    "DeepSeek-V4 decode server with FlexKV: the decode radix tree "
+                    "is used for FlexKV stores only; decode-side prefix reuse is "
+                    "disabled and prefill transfers the whole prompt."
                 )
             if getattr(model_config, "is_hybrid_swa_compress", False):
                 raise ValueError(

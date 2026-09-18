@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import threading
@@ -31,6 +32,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchResult,
 )
 from sglang.srt.mem_cache.radix_cache import RadixKey
+from sglang.srt.runtime_context import get_disagg
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -108,6 +110,12 @@ class FlexKVHybridRadixCache(BasePrefixCache):
         self.page_size = inner_cache.page_size
         self.disable = inner_cache.disable
         self.device = inner_cache.device
+        # PD decode has no FlexKV restore path: report device hits only, keep storing.
+        self._pd_decode = get_disagg().disaggregation_mode == "decode"
+        # DSv4 compressed KV is not in the tree: decode matches get the empty prefix.
+        self._pd_decode_store_only = self._pd_decode and bool(
+            getattr(model_config, "is_deepseek_v4_arch", False)
+        )
 
         kvcache = self.token_to_kv_pool_allocator.get_kvcache()
         if isinstance(
@@ -195,8 +203,15 @@ class FlexKVHybridRadixCache(BasePrefixCache):
             raise RuntimeError(
                 f"FlexKV prefix rematch before restore commit: rid={params.req.rid}"
             )
+        if self.__dict__.get("_pd_decode_store_only", False):
+            params = dataclasses.replace(params, key=params.key[:0])
+            return self._inner_cache.match_prefix(params)
         result = self._inner_cache.match_prefix(params)
-        if self.disable or params.req is None:
+        if (
+            self.disable
+            or params.req is None
+            or self.__dict__.get("_pd_decode", False)
+        ):
             return result
 
         key = params.key.page_aligned(self.page_size)
@@ -782,8 +797,11 @@ class FlexKVHybridRadixCache(BasePrefixCache):
     def inc_lock_ref(self, node: Any) -> IncLockRefResult:
         return self._inner_cache.inc_lock_ref(node)
 
-    def dec_lock_ref(self, node: Any, params: Optional[DecLockRefParams] = None) -> Any:
-        return self._inner_cache.dec_lock_ref(node, params)
+    def dec_lock_ref(
+        self, node: Any, params: Optional[DecLockRefParams] = None, **kwargs: Any
+    ) -> Any:
+        # The decode prealloc queue passes skip_swa=True for the SWA-tail path.
+        return self._inner_cache.dec_lock_ref(node, params, **kwargs)
 
     def supports_swa(self) -> bool:
         return self._inner_cache.supports_swa()

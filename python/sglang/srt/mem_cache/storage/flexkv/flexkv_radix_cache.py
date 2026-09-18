@@ -50,7 +50,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchResult,
 )
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
-from sglang.srt.runtime_context import get_spec
+from sglang.srt.runtime_context import get_disagg, get_spec
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -135,6 +135,9 @@ class FlexKVRadixCache(RadixCache):
         attn_cp_group=None,
     ) -> None:
         super().__init__(params)
+
+        # PD decode has no FlexKV restore path: skip host lookups, keep storing.
+        self._pd_decode = get_disagg().disaggregation_mode == "decode"
 
         kvcache = self.token_to_kv_pool_allocator.get_kvcache()
         # ``tp_group`` and ``attn_tp_group`` are sometimes passed
@@ -256,7 +259,7 @@ class FlexKVRadixCache(RadixCache):
         depending on whether layerwise transfer is enabled.
         """
         key = params.key
-        if self.disable or not key:
+        if self.disable or not key or self.__dict__.get("_pd_decode", False):
             return super().match_prefix(params)
         if params.req is not None and self.has_uncommitted_restore(params.req):
             raise RuntimeError(
