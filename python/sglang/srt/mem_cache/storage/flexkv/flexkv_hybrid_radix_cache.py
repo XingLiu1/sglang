@@ -473,6 +473,7 @@ class FlexKVHybridRadixCache(BasePrefixCache):
     def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs) -> None:
         self._validate_restore_lease(req)
         self._apply_restore_swa_boundary(req)
+        self._drop_unrecoverable_swa_branch(req)
         kv_length = int(kwargs.get("kv_len_to_handle", req.kv.kv_committed_len))
         token_ids = (req.origin_input_ids + req.output_ids)[:kv_length]
         self._inner_cache.cache_finished_req(req, is_insert=is_insert, **kwargs)
@@ -485,6 +486,7 @@ class FlexKVHybridRadixCache(BasePrefixCache):
     def cache_unfinished_req(self, req: Req, **kwargs) -> None:
         self._validate_restore_lease(req)
         self._apply_restore_swa_boundary(req)
+        self._drop_unrecoverable_swa_branch(req)
         chunked = kwargs.get("chunked", False)
         grid_tokens = self._swa_grid_tokens
         # Prefix length as of the previous chunk boundary; the inner insert
@@ -700,6 +702,38 @@ class FlexKVHybridRadixCache(BasePrefixCache):
             return
         req.kv.swa_evicted_seqlen = max(req.kv.swa_evicted_seqlen, boundary)
         del req._flexkv_swa_evicted_seqlen
+
+    def _drop_unrecoverable_swa_branch(self, req: Req) -> None:
+        """Let the inner insert run past an SWA branching point this request
+        cannot recover.
+
+        ``req.swa_branching_seqlen`` marks full KV in the device tree beyond
+        the last SWA-valid boundary (tombstoned SWA). The inner cache caps the
+        prefill-completion insert there so the request's own SWA rebuilds
+        those nodes and the re-match lands on the branching point.
+
+        A FlexKV restore carries SWA for its last page only and moves
+        ``swa_evicted_seqlen`` up to that page, so below the cursor there is
+        nothing to rebuild with. With the cap in place every overlapping node
+        would stay tombstoned, no live leaf would be created, and the re-match
+        would come back empty (``new_prefix_len > len(new_indices)``). Drop
+        the cap unless the live SWA the request holds reaches back a full
+        sliding window from the branching point; the insert then covers the
+        whole page-aligned prefix as usual and the restored tail page is a
+        valid SWA window.
+        """
+        branching_seqlen = getattr(req, "swa_branching_seqlen", None)
+        if branching_seqlen is None or req.kv is None:
+            return
+        window = getattr(self._inner_cache, "sliding_window_size", None)
+        if window is None:
+            return
+        cursor = req.kv.swa_evicted_seqlen
+        if (
+            cursor > req.kv.cache_protected_len
+            and branching_seqlen - cursor < window
+        ):
+            req.swa_branching_seqlen = None
 
     def evict(self, params: EvictParams) -> EvictResult:
         # Local memory pressure can make eviction asymmetric across TP/CP

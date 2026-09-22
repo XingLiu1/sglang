@@ -117,6 +117,81 @@ def test_restored_swa_tail_marks_older_prefix_as_evicted_before_cache_insert():
     inner.cache_unfinished_req.assert_called_once_with(req, chunked=True)
 
 
+def _cache_with_swa_window(window: int):
+    inner = MagicMock()
+    inner.sliding_window_size = window
+    cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)
+    cache._inner_cache = inner
+    cache._restore_leases = {}
+    cache._aborted_restore_leases = {}
+    cache._store_prefix = MagicMock()
+    return cache, inner
+
+
+def _restored_req(*, branching_seqlen, restore_boundary, protected_len=0):
+    return SimpleNamespace(
+        rid="request",
+        kv=SimpleNamespace(
+            swa_evicted_seqlen=0,
+            cache_protected_len=protected_len,
+            kv_committed_len=1300,
+        ),
+        swa_branching_seqlen=branching_seqlen,
+        _flexkv_swa_evicted_seqlen=restore_boundary,
+        origin_input_ids=list(range(1300)),
+        output_ids=[],
+        get_fill_ids=lambda: list(range(1300)),
+    )
+
+
+def test_swa_branch_cap_is_dropped_when_the_restore_cannot_recover_it():
+    # Device tree: 1024 tokens of full KV with tombstoned SWA (branching point
+    # 1024), device match 0. FlexKV restored 1280 tokens with SWA for the last
+    # page only, so the cursor lands on 1024: a capped insert would rebuild no
+    # SWA, create no live leaf, and the inner re-match would come back empty.
+    cache, inner = _cache_with_swa_window(128)
+    req = _restored_req(branching_seqlen=1024, restore_boundary=1024)
+
+    cache.cache_unfinished_req(req)
+
+    assert req.kv.swa_evicted_seqlen == 1024
+    assert req.swa_branching_seqlen is None
+    inner.cache_unfinished_req.assert_called_once_with(req)
+
+
+def test_swa_branch_cap_is_dropped_on_the_finished_path_too():
+    cache, inner = _cache_with_swa_window(128)
+    req = _restored_req(branching_seqlen=1024, restore_boundary=1024)
+
+    cache.cache_finished_req(req)
+
+    assert req.swa_branching_seqlen is None
+    inner.cache_finished_req.assert_called_once_with(req, is_insert=True)
+
+
+def test_swa_branch_cap_is_kept_when_the_restored_page_reaches_it():
+    # Restored SWA covers [768, 1024): a full sliding window ending at the
+    # branching point, so the capped insert rebuilds those nodes as designed.
+    cache, inner = _cache_with_swa_window(128)
+    req = _restored_req(branching_seqlen=1024, restore_boundary=768)
+
+    cache.cache_unfinished_req(req)
+
+    assert req.kv.swa_evicted_seqlen == 768
+    assert req.swa_branching_seqlen == 1024
+
+
+def test_swa_branch_cap_is_kept_when_the_cursor_stays_on_the_device_prefix():
+    # Device match 512 followed by a one-page restore: the cursor equals the
+    # protected prefix, every node above it is rebuilt from restored SWA.
+    cache, inner = _cache_with_swa_window(128)
+    req = _restored_req(branching_seqlen=1024, restore_boundary=512, protected_len=512)
+
+    cache.cache_unfinished_req(req)
+
+    assert req.swa_branching_seqlen == 1024
+
+
 def test_restore_lease_blocks_duplicate_lookup_until_cache_commit():
     node = object()
     inner_match = MatchResult(
