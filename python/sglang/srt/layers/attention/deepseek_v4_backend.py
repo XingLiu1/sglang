@@ -3923,6 +3923,11 @@ class DeepseekV4AttnBackend(
                     extra_k_cache=extra_k_cache,
                     extra_indices_in_kvcache=extra_indices,
                     extra_topk_length=extra_topk_lengths,
+                    **(
+                        {"kv_format": "V41"}
+                        if token_to_kv_pool.kv_layout is KVLayout.V41
+                        else {}
+                    ),
                 )[0]
 
             o = o.squeeze(1)
