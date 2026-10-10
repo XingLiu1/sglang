@@ -3,16 +3,21 @@
 import importlib.util
 import json
 import sys
+from array import array
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
+    InsertParams,
+    MatchPrefixParams,
 )
+from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
 from sglang.srt.mem_cache.storage.flexkv import _flexkv_factory
 from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -42,6 +47,90 @@ def _load_flexkv_module(module_filename: str, module_name: str):
     with patch.dict(sys.modules, {connector_name: connector_stub}):
         spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(
+    params=[
+        ("flexkv_radix_cache.py", "FlexKVRadixCache"),
+        ("flexkv_hybrid_radix_cache.py", "FlexKVHybridRadixCache"),
+    ]
+)
+def lookup_cache(request):
+    module_filename, class_name = request.param
+    module = _load_flexkv_module(module_filename, f"_flexkv_lookup_ut_{class_name}")
+    cache_class = getattr(module, class_name)
+    inner = RadixCache.create_simulated(page_size=4)
+    cache = cache_class.__new__(cache_class)
+    if class_name == "FlexKVRadixCache":
+        cache.__dict__.update(inner.__dict__)
+    else:
+        cache._inner_cache = inner
+    cache.flexkv_connector = MagicMock(supports_cache_namespace=True)
+    cache._load_markers = {}
+    cache._restore_leases = {}
+    cache._aborted_restore_leases = {}
+    return cache
+
+
+@pytest.mark.parametrize("rematch", ["device_hit", "host_miss", "empty"])
+def test_rematch_releases_the_previous_host_lookup(lookup_cache, rematch):
+    cache = lookup_cache
+    req = SimpleNamespace(
+        rid="waiting", cache_request_handle=CacheRequestHandle("waiting", 0)
+    )
+    rid = _tracking_key("waiting")
+    key = RadixKey(array("q", range(8)))
+    cache.flexkv_connector.lookup_kv.return_value = (17, 8)
+    first_match = cache.match_prefix(MatchPrefixParams(key=key, req=req))
+    assert first_match.host_hit_length == 8
+    cache.flexkv_connector.release_pending.assert_not_called()
+    # The scheduler rematches waiting requests every round; only a later hit
+    # makes the connector replace (and cancel) the previously held task.
+    if rematch == "device_hit":
+        inner = getattr(cache, "_inner_cache", cache)
+        inner.insert(InsertParams(key=key, value=torch.arange(100, 108)))
+    elif rematch == "host_miss":
+        cache.flexkv_connector.lookup_kv.return_value = (-1, 0)
+    else:
+        key = RadixKey(array("q"))
+
+    result = cache.match_prefix(MatchPrefixParams(key=key, req=req))
+
+    cache.flexkv_connector.release_pending.assert_called_once_with(rid)
+    assert result.host_hit_length == 0
+    assert rid not in cache._load_markers
+
+
+def test_completion_releases_only_its_unused_lookup(lookup_cache):
+    cache = lookup_cache
+    req = SimpleNamespace(
+        rid="finished",
+        cache_request_handle=CacheRequestHandle("finished", 0),
+        origin_input_ids=array("q", range(8)),
+        output_ids=array("q"),
+        extra_key=None,
+        cache_salt=None,
+        kv=SimpleNamespace(kv_committed_len=8, swa_evicted_seqlen=0),
+    )
+    rid = _tracking_key("finished")
+    other_rid = _tracking_key("waiting")
+    cache.flexkv_connector.lookup_kv.return_value = (17, 8)
+    cache.match_prefix(MatchPrefixParams(key=RadixKey(req.origin_input_ids), req=req))
+    other_marker = object()
+    cache._load_markers[other_rid] = other_marker
+    store_node = object()
+    cache._inflight_store_nodes = {rid: store_node}
+
+    inner = getattr(cache, "_inner_cache", None)
+    target = inner if inner is not None else RadixCache
+    with patch.object(target, "cache_finished_req"):
+        cache.cache_finished_req(req, is_insert=False, owned_kv_len=8)
+
+    cache.flexkv_connector.release_pending.assert_called_once_with(rid)
+    # Another request's lookup and in-flight Store ownership are untouched.
+    assert cache._load_markers == {other_rid: other_marker}
+    assert cache._inflight_store_nodes == {rid: store_node}
+    cache.flexkv_connector.cancel_prefetch.assert_not_called()
 
 
 def test_scheduler_flexkv_prefetch_is_one_liner_to_tree_cache():

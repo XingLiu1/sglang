@@ -474,7 +474,7 @@ def test_prefill_boundary_is_stored_with_an_independent_tracking_key(salt):
 def _forwarding_connector():
     """FlexKV main connector shape: an explicit ``namespace=None`` parameter
     forwarded verbatim to the KV manager (taco-project/FlexKV b77b125)."""
-    connector = MagicMock(spec=["kv_manager"])
+    connector = MagicMock(spec=["kv_manager", "release_pending"])
     connector.kv_manager = MagicMock()
     connector.supports_cache_namespace = True
     kv_manager = connector.kv_manager

@@ -166,6 +166,9 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
             raise RuntimeError(
                 f"FlexKV prefix rematch before restore commit: rid={_request_key(params.req.cache_request_handle)}"
             )
+        if params.req is not None:
+            # A rematch supersedes the previous lookup even if it misses.
+            self._release_load_marker(params.req.cache_request_handle)
         result = self._inner_cache.match_prefix(params)
         if self.disable or params.req is None:
             return result
@@ -381,6 +384,7 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
         token_ids = (req.origin_input_ids + req.output_ids)[:kv_length]
         self._inner_cache.cache_finished_req(req, is_insert=is_insert, **kwargs)
         self._commit_restore(req)
+        self._release_load_marker(req.cache_request_handle)
         if not is_insert:
             return
 

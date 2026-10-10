@@ -242,6 +242,9 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         Both synchronous and layerwise modes defer H2D until admission.
         """
         key = params.key
+        if params.req is not None:
+            # A rematch supersedes the previous lookup even if it misses.
+            self._release_load_marker(params.req.cache_request_handle)
         if self.disable or not key:
             return super().match_prefix(params)
         if params.req is not None and self.has_uncommitted_restore(params.req):
@@ -626,6 +629,7 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             )
         super().cache_finished_req(req, is_insert=is_insert, owned_kv_len=owned_kv_len)
         self._commit_restore(req)
+        self._release_load_marker(req.cache_request_handle)
         # Late cleanup of an aborted Req must not release a new producer
         # that reused its rid while the old allocation was retained.
         if not self.has_uncommitted_restore(req):
@@ -638,7 +642,6 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             else None
         )
         if namespace_kwargs is None:
-            self._load_markers.pop(_request_key(req.cache_request_handle), None)
             return
 
         token_ids = (req.origin_input_ids + req.output_ids)[:owned_kv_len]
