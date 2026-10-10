@@ -521,7 +521,9 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             self.evict(EvictParams(num_tokens=uncached_len))
         token_slots = self.token_to_kv_pool_allocator.alloc(uncached_len)
         if token_slots is None:
-            return (reused_indices, last_node) if reused_indices.numel() > 0 else None
+            # The reused prefix stays tree-owned. Return None so init_load_back
+            # releases the held task a refreshed lookup may have re-stashed.
+            return None
 
         # The FlexKV ``launch`` interface takes the slot indices for the
         # tokens it will write — no leading ``-1`` padding (FlexKV has

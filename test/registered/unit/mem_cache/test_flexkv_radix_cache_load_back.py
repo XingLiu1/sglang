@@ -401,22 +401,30 @@ def test_partial_duplicate_restore_relooks_up_only_missing_suffix():
     assert torch.equal(match.device_indices, restored_indices)
 
 
-def test_partial_duplicate_restore_keeps_reused_prefix_when_alloc_fails():
+def test_partial_duplicate_restore_releases_relookup_when_alloc_fails():
+    """A refreshed lookup re-stashes a held task that pins its host prefix;
+    an allocation failure must release it, not leave it until abort or reset."""
     cache, allocator = _make_cache()
-    first_page = RadixKey(array("q", range(4)))
     full_key = RadixKey(array("q", range(8)))
-
-    (first_indices, first_node), _ = _load(cache, first_page, 0, 4, "first")
+    _load(cache, full_key[:4], 0, 4, "first")
+    rid = _tracking_key("second")
+    cache._load_markers[rid] = SimpleNamespace(key=full_key, value_numel=0)
+    req = SimpleNamespace(
+        rid="second", cache_request_handle=CacheRequestHandle("second", 0)
+    )
+    cache.flexkv_connector.reset_mock()
     cache.flexkv_connector.lookup_kv.return_value = (17, 4)
     allocator.alloc.side_effect = None
     allocator.alloc.return_value = None
 
-    (restored_indices, last_node), second_load = _load(cache, full_key, 0, 8, "second")
+    indices, node = cache.init_load_back(
+        InitLoadBackParams(best_match_node=cache.root_node, host_hit_length=8, req=req)
+    )
 
-    second_load.assert_not_called()
-    assert torch.equal(restored_indices, first_indices)
-    assert last_node is first_node
-    assert cache.evictable_leaves == {first_node}
+    assert indices.numel() == 0
+    assert node is cache.root_node
+    cache.flexkv_connector.start_load_kv_layerwise.assert_not_called()
+    assert cache.flexkv_connector.mock_calls[-1] == call.release_pending(rid)
     assert cache.evictable_size() == 4
 
 
