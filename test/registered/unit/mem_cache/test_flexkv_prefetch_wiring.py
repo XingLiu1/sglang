@@ -7,6 +7,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
@@ -90,3 +92,45 @@ def test_scheduler_polls_explicit_flexkv_backend_without_legacy_flag():
     ):
         sched._process_hicache_events()
     sched.tree_cache.check_hicache_events.assert_called_once_with()
+
+
+@pytest.mark.parametrize("entrypoint", ["scheduler", "shutdown"])
+@pytest.mark.parametrize(
+    "module_filename, class_name",
+    [
+        ("flexkv_radix_cache.py", "FlexKVRadixCache"),
+        ("flexkv_hybrid_radix_cache.py", "FlexKVHybridRadixCache"),
+    ],
+)
+def test_shutdown_releases_flexkv_and_inner_host_resources(
+    module_filename, class_name, entrypoint
+):
+    module = _load_flexkv_module(module_filename, f"_flexkv_shutdown_ut_{class_name}")
+    cache_class = getattr(module, class_name)
+    cache = cache_class.__new__(cache_class)
+    order = []
+    cache.token_to_kv_pool_host = MagicMock()
+    cache.token_to_kv_pool_host.destroy.side_effect = lambda: order.append("flexkv")
+    hybrid = class_name == "FlexKVHybridRadixCache"
+    if hybrid:
+        cache._inner_cache = MagicMock()
+        cache._inner_cache.release_host_resources.side_effect = lambda: order.append(
+            "inner"
+        )
+
+    if entrypoint == "shutdown":
+        cache.shutdown()
+    else:
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.tree_cache = cache
+        scheduler.hisparse_coordinator = None
+        scheduler.decode_offload_manager = None
+        with (
+            patch("sglang.srt.managers.scheduler.destroy_global_experts_capturer"),
+            patch("sglang.srt.managers.scheduler.destroy_global_indexer_capturer"),
+            patch("sglang.srt.managers.scheduler.rank_consensus_checker"),
+        ):
+            scheduler.release_host_resources()
+
+    cache.token_to_kv_pool_host.destroy.assert_called_once()
+    assert order == (["flexkv", "inner"] if hybrid else ["flexkv"])

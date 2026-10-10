@@ -154,10 +154,12 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
 
     def release_host_resources(self) -> None:
         self.token_to_kv_pool_host.destroy()
+        # BasePrefixCache defines this hook, so __getattr__ never forwards it.
+        self._inner_cache.release_host_resources()
 
     def shutdown(self) -> None:
-        # Prefer token_to_kv_pool_host.destroy() (HiCache path); keep this alias.
-        self.token_to_kv_pool_host.destroy()
+        # Legacy alias; graceful exit goes through release_host_resources().
+        self.release_host_resources()
 
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
         if params.req is not None and self.has_uncommitted_restore(params.req):
