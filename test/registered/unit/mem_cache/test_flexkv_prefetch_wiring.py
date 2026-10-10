@@ -13,6 +13,8 @@ from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
 )
+from sglang.srt.mem_cache.storage.flexkv import _flexkv_factory
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
@@ -134,3 +136,67 @@ def test_shutdown_releases_flexkv_and_inner_host_resources(
 
     cache.token_to_kv_pool_host.destroy.assert_called_once()
     assert order == (["flexkv", "inner"] if hybrid else ["flexkv"])
+
+
+@pytest.mark.parametrize("enable_dp_attention, expected_rank", [(False, 2), (True, 3)])
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_factory_uses_published_parallel_context(
+    enable_dp_attention, expected_rank, hybrid
+):
+    parallel = SimpleNamespace(
+        pp_group=SimpleNamespace(rank_in_group=1),
+        attn_tp_group=object(),
+        attn_cp_group=SimpleNamespace(rank_in_group=0),
+        dp_rank=2,
+        attn_dp_rank=3,
+    )
+    context = SimpleNamespace(
+        server_args=SimpleNamespace(enable_dp_attention=enable_dp_attention),
+        params=SimpleNamespace(is_eagle=False),
+        model_config=object(),
+        tp_rank=6,
+        tp_size=8,
+        tp_group=object(),
+        # Stale worker state must not leak into the connector topology.
+        tp_worker=SimpleNamespace(ps=SimpleNamespace(dp_rank=99, attn_dp_rank=99)),
+        enable_hierarchical_cache=False,
+        is_hybrid_ssm=False,
+        is_hybrid_swa=hybrid,
+    )
+    radix_module = MagicMock()
+    hybrid_module = MagicMock()
+    unified_module = MagicMock()
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "flexkv.integration.sglang.connector": MagicMock(),
+                "sglang.srt.mem_cache.storage.flexkv.flexkv_radix_cache": radix_module,
+                "sglang.srt.mem_cache.storage.flexkv.flexkv_hybrid_radix_cache": hybrid_module,
+                "sglang.srt.mem_cache.unified_radix_cache": unified_module,
+            },
+        ),
+        patch(
+            "sglang.srt.mem_cache.storage.flexkv.get_serving",
+            return_value=SimpleNamespace(enable_streaming_session=False),
+        ),
+        patch(
+            "sglang.srt.mem_cache.storage.flexkv.get_memory",
+            return_value=SimpleNamespace(flexkv_config_file=None),
+        ),
+        patch("sglang.srt.runtime_context.get_parallel", return_value=parallel),
+    ):
+        result = _flexkv_factory(context)
+
+    constructor = (
+        hybrid_module.FlexKVHybridRadixCache
+        if hybrid
+        else radix_module.FlexKVRadixCache
+    )
+    assert result is constructor.return_value
+    assert constructor.call_args.kwargs["dp_rank"] == expected_rank
+    assert constructor.call_args.kwargs["pp_rank"] == 1
+    assert constructor.call_args.kwargs["attn_cp_rank"] == 0
+    if hybrid:
+        assert context.params.tree_components == (ComponentType.FULL, ComponentType.SWA)
+        unified_module.UnifiedRadixCache.assert_called_once_with(context.params)
