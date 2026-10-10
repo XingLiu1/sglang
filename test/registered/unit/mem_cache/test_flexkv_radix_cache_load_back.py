@@ -57,6 +57,34 @@ def _load_flexkv_radix_cache_class():
 FlexKVRadixCache = _load_flexkv_radix_cache_class()
 
 
+def _forwarding_connector():
+    """FlexKV main connector shape: an explicit ``namespace=None`` parameter
+    forwarded verbatim to the KV manager (taco-project/FlexKV b77b125)."""
+    connector = MagicMock()
+    connector.supports_cache_namespace = True
+    connector.is_store_sync_leader = True
+    connector.sync_ready_store_rids.side_effect = lambda rids: list(rids)
+    kv_manager = connector.kv_manager
+
+    def lookup_kv(token_ids, token_mask, rid=None, sglang_req_id=None, namespace=None):
+        kv_manager.get_match(
+            token_ids=token_ids, token_mask=token_mask, namespace=namespace
+        )
+        return 17, int(token_mask.sum())
+
+    def store_kv(rid, token_ids, kv_indices, sglang_req_id=None, namespace=None):
+        kv_manager.put_match(token_ids=token_ids, namespace=namespace)
+        return 18
+
+    connector.lookup_kv = lookup_kv
+    connector.store_kv = store_kv
+    return connector
+
+
+def _forwarded_namespaces(calls):
+    return [c.kwargs["namespace"] for c in calls]
+
+
 @pytest.mark.parametrize("supported", [False, True])
 @pytest.mark.parametrize("extra_key,cache_salt", [("lora-a", None), (None, "tenant-a")])
 def test_namespaced_lookup_requires_connector_support(extra_key, cache_salt, supported):
@@ -399,6 +427,82 @@ def test_partial_duplicate_restore_relooks_up_only_missing_suffix():
 
     match = RadixCache.match_prefix(cache, MatchPrefixParams(key=full_key))
     assert torch.equal(match.device_indices, restored_indices)
+
+
+@pytest.mark.parametrize(
+    "extra_key,cache_salt", [(None, "tenant-a"), (None, "tenant-b"), ("lora", None)]
+)
+def test_forwarding_connector_scopes_lookup_relookup_and_store(extra_key, cache_salt):
+    cache, allocator = _make_cache()
+    connector = _forwarding_connector()
+    cache.flexkv_connector = connector
+    request_row = torch.tensor([[0] * 8], dtype=torch.int64)
+    cache.req_to_token_pool = SimpleNamespace(req_to_token=request_row)
+    expected = _namespace_kwargs(connector, extra_key, cache_salt)["namespace"]
+    first_page = RadixKey(array("q", range(4)), extra_key, cache_salt=cache_salt)
+    full_key = RadixKey(array("q", range(8)), extra_key, cache_salt=cache_salt)
+    req = SimpleNamespace(
+        rid="scoped", cache_request_handle=CacheRequestHandle("scoped", 0)
+    )
+
+    # Lookup: the namespace reaches the manager, not just the connector call.
+    assert cache.match_prefix(
+        MatchPrefixParams(key=full_key, req=req)
+    ).host_hit_length == (8)
+    # Partial duplicate re-lookup of the missing suffix keeps the same scope.
+    _load(cache, first_page, 0, 4, "first")
+    _load(cache, full_key, 0, 8, "second")
+    # Store of a finished request.
+    finished = SimpleNamespace(
+        rid="finished",
+        cache_request_handle=CacheRequestHandle("finished", 0),
+        origin_input_ids=array("q", range(8)),
+        output_ids=array("q"),
+        kv=SimpleNamespace(kv_committed_len=8, req_pool_idx=0, cache_protected_len=0),
+        extra_key=extra_key,
+        cache_salt=cache_salt,
+        last_node=cache.root_node,
+        _flexkv_uncached_restore=False,
+    )
+    request_row[0] = torch.arange(200, 208)
+    with (
+        patch.dict(
+            FlexKVRadixCache.cache_finished_req.__globals__,
+            {"get_spec": lambda: SimpleNamespace(speculative_eagle_topk=None)},
+        ),
+        patch("torch.cuda.current_stream", return_value=MagicMock()),
+        patch(
+            "torch.cuda.stream", side_effect=lambda _stream: contextlib.nullcontext()
+        ),
+    ):
+        cache.cache_finished_req(finished, owned_kv_len=8)
+
+    lookups = _forwarded_namespaces(connector.kv_manager.get_match.call_args_list)
+    assert lookups == [expected, expected]
+    stores = _forwarded_namespaces(connector.kv_manager.put_match.call_args_list)
+    assert stores == [expected]
+    assert all(namespace is not None for namespace in lookups + stores)
+
+
+def test_forwarding_connector_keeps_tenants_apart_and_unscoped_unchanged():
+    namespaces = {}
+    for cache_salt in ("tenant-a", "tenant-b", None):
+        cache, _ = _make_cache()
+        connector = _forwarding_connector()
+        cache.flexkv_connector = connector
+        key = RadixKey(array("q", range(4)), cache_salt=cache_salt)
+        req = SimpleNamespace(
+            rid="same", cache_request_handle=CacheRequestHandle("same", 0)
+        )
+        cache.match_prefix(MatchPrefixParams(key=key, req=req))
+        namespaces[cache_salt] = connector.kv_manager.get_match.call_args.kwargs[
+            "namespace"
+        ]
+
+    assert namespaces["tenant-a"] != namespaces["tenant-b"]
+    assert None not in (namespaces["tenant-a"], namespaces["tenant-b"])
+    # Unscoped requests keep the historical (namespace-free) host identity.
+    assert namespaces[None] is None
 
 
 def test_partial_duplicate_restore_releases_relookup_when_alloc_fails():

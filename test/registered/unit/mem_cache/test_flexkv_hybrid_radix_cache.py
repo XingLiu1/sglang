@@ -471,6 +471,71 @@ def test_prefill_boundary_is_stored_with_an_independent_tracking_key(salt):
         ).get("namespace")
 
 
+def _forwarding_connector():
+    """FlexKV main connector shape: an explicit ``namespace=None`` parameter
+    forwarded verbatim to the KV manager (taco-project/FlexKV b77b125)."""
+    connector = MagicMock(spec=["kv_manager"])
+    connector.kv_manager = MagicMock()
+    connector.supports_cache_namespace = True
+    kv_manager = connector.kv_manager
+
+    def lookup_kv(token_ids, token_mask, rid=None, sglang_req_id=None, namespace=None):
+        kv_manager.get_match(
+            token_ids=token_ids, token_mask=token_mask, namespace=namespace
+        )
+        return 17, int(token_mask.sum())
+
+    def store_kv(rid, token_ids, kv_indices, sglang_req_id=None, namespace=None):
+        kv_manager.put_match(token_ids=token_ids, namespace=namespace)
+        return 18
+
+    connector.lookup_kv = lookup_kv
+    connector.store_kv = store_kv
+    return connector
+
+
+@pytest.mark.parametrize(
+    "extra_key,cache_salt", [(None, "tenant-a"), (None, "tenant-b"), ("lora", None)]
+)
+def test_forwarding_connector_scopes_hybrid_lookup_and_store(extra_key, cache_salt):
+    cache, req, _, _ = _make_layerwise_restore()
+    connector = _forwarding_connector()
+    cache.flexkv_connector = connector
+    cache.page_size = 4
+    cache._store_generation = 0
+    req.extra_key, req.cache_salt = extra_key, cache_salt
+    expected = _namespace_kwargs(connector, extra_key, cache_salt)["namespace"]
+    inner = cache._inner_cache
+    inner.is_root.return_value = False
+    inner.is_eagle = False
+    inner.match_prefix.side_effect = [
+        MatchResult(
+            device_indices=torch.empty(0, dtype=torch.int64),
+            last_device_node=req.last_node,
+            last_host_node=req.last_node,
+            best_match_node=req.last_node,
+        ),
+        SimpleNamespace(
+            last_device_node=object(),
+            device_indices=torch.tensor([8, 9, 10, 11], dtype=torch.int64),
+        ),
+    ]
+    inner.inc_lock_ref.return_value = SimpleNamespace(to_dec_params=lambda: None)
+    key = RadixKey(array("q", range(4)), extra_key, cache_salt=cache_salt)
+
+    assert cache.match_prefix(MatchPrefixParams(key=key, req=req)).host_hit_length == 4
+    with (
+        patch("torch.cuda.current_stream", return_value=MagicMock()),
+        patch("torch.cuda.stream", return_value=nullcontext()),
+    ):
+        cache._store_prefix(req, [0, 1, 2, 3])
+
+    lookup = connector.kv_manager.get_match.call_args.kwargs["namespace"]
+    store = connector.kv_manager.put_match.call_args.kwargs["namespace"]
+    assert lookup == store == expected
+    assert expected is not None
+
+
 def test_reset_drains_flexkv_before_releasing_inner_slots():
     calls = MagicMock()
     connector = MagicMock()
