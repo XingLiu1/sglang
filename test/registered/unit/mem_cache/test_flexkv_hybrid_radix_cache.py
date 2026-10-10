@@ -570,6 +570,34 @@ def _make_layerwise_restore(loaded=4):
     return cache, req, params, restored
 
 
+def test_stale_hybrid_abort_does_not_cancel_a_new_request_attempt():
+    cache, previous, params, _ = _make_layerwise_restore()
+    cache.init_load_back(params)
+    cache.release_aborted_request(previous.cache_request_handle)
+    current = SimpleNamespace(**vars(previous))
+    current.kv = SimpleNamespace(**vars(previous.kv))
+    current.cache_request_handle = CacheRequestHandle(previous.rid, 1)
+    cache._load_markers[_tracking_key(previous.rid, 1)] = SimpleNamespace(
+        device_length=0
+    )
+    cache._alloc_restore_slots.return_value = torch.arange(40, 44, dtype=torch.int64)
+    cache.init_load_back(
+        InitLoadBackParams(
+            best_match_node=current.last_node, host_hit_length=4, req=current
+        )
+    )
+
+    # A late abort for the retired attempt must not touch the retry's lease.
+    cache.release_aborted_request(previous.cache_request_handle)
+
+    assert cache.has_uncommitted_restore(current)
+    assert cache._restore_leases[_tracking_key(previous.rid, 1)].req is current
+    cache.flexkv_connector.cancel_prefetch.assert_called_with(
+        _tracking_key(previous.rid, 0)
+    )
+    cache.token_to_kv_pool_allocator.free.assert_not_called()
+
+
 @pytest.mark.parametrize("loaded", [2, 5])
 def test_unexpected_layerwise_length_retains_every_slot_until_drained_reset(loaded):
     cache, req, params, restored = _make_layerwise_restore(loaded)

@@ -549,6 +549,8 @@ def test_finished_store_uses_radix_owned_slots_after_request_row_is_cleared(salt
     assert stored.get("namespace") == _namespace_kwargs(
         cache.flexkv_connector, None, salt
     ).get("namespace")
+    assert stored["rid"] == _tracking_key("finished-request")
+    assert stored["sglang_req_id"] == "finished-request"
     assert stored["token_ids"] == [1, 2, 3, 4]
     assert stored["kv_indices"].tolist() == [4, 5, 6, 7]
     cache.store_stream.wait_stream.assert_called_once_with(producer_stream)
@@ -614,6 +616,8 @@ def test_async_store_waits_for_event_then_uses_pinned_cpu_mapping(salt):
     assert stored.get("namespace") == _namespace_kwargs(
         cache.flexkv_connector, None, salt
     ).get("namespace")
+    assert stored["rid"] == _tracking_key("async-store")
+    assert stored["sglang_req_id"] == "async-store"
     assert stored["kv_indices"] is cpu_mapping
     assert cache._pending_store_copies == {}
     assert _tracking_key("async-store") in cache._inflight_store_nodes
@@ -764,10 +768,10 @@ class _TestReq(SimpleNamespace):
     __hash__ = object.__hash__
 
 
-def _restore_request(cache, *, rid="ip-request", length=4, load_fn=None):
+def _restore_request(cache, *, rid="ip-request", length=4, load_fn=None, attempt_id=0):
     req = _TestReq(
         rid=rid,
-        cache_request_handle=CacheRequestHandle(rid, 0),
+        cache_request_handle=CacheRequestHandle(rid, attempt_id),
         origin_input_ids=array("q", range(length)),
         output_ids=array("q"),
         kv=SimpleNamespace(
@@ -785,7 +789,7 @@ def _restore_request(cache, *, rid="ip-request", length=4, load_fn=None):
         value_numel=0,
         uncached_len=length,
         last_node=cache.root_node,
-        tracking_rid=_tracking_key(rid),
+        tracking_rid=_tracking_key(rid, attempt_id),
         sglang_req_id=rid,
         load_fn=load_fn or (lambda slots: int(slots.numel())),
         request_owned_req=req,
@@ -799,6 +803,23 @@ def _restore_request(cache, *, rid="ip-request", length=4, load_fn=None):
             write=lambda index, value: row.__setitem__(index, value),
         )
     return req
+
+
+def test_stale_abort_does_not_cancel_a_new_request_attempt():
+    cache, allocator = _make_cache()
+    previous = _restore_request(cache)
+    cache.release_aborted_request(previous.cache_request_handle)
+    current = _restore_request(cache, rid=previous.rid, attempt_id=1)
+
+    # A late abort for the retired attempt must not touch the retry's lease.
+    cache.release_aborted_request(previous.cache_request_handle)
+
+    assert cache.has_uncommitted_restore(current)
+    assert cache._restore_leases[_tracking_key(current.rid, 1)].req is current
+    cache.flexkv_connector.cancel_prefetch.assert_called_with(
+        _tracking_key(previous.rid, 0)
+    )
+    allocator.free.assert_not_called()
 
 
 @pytest.mark.parametrize("completion", ["insert", "discard", "chunk"])
