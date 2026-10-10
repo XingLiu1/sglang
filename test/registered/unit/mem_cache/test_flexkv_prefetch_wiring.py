@@ -118,8 +118,22 @@ def test_completion_releases_only_its_unused_lookup(lookup_cache):
     cache.match_prefix(MatchPrefixParams(key=RadixKey(req.origin_input_ids), req=req))
     other_marker = object()
     cache._load_markers[other_rid] = other_marker
+    # Seed Store ownership with each adapter's real tracking keys: the hybrid
+    # adapter suffixes a generation, the ordinary one also stages copies.
     store_node = object()
-    cache._inflight_store_nodes = {rid: store_node}
+    hybrid = hasattr(cache, "_inner_cache")
+    if hybrid:
+        dec_params = object()
+        inflight = {f"{rid}:flexkv-store:0": (store_node, dec_params)}
+        cache._inner_cache.dec_lock_ref = MagicMock()
+        unlock = cache._inner_cache.dec_lock_ref
+    else:
+        inflight = {rid: store_node}
+        staged = SimpleNamespace(node=store_node)
+        cache._pending_store_copies = {rid: staged}
+        cache.dec_lock_ref = MagicMock()
+        unlock = cache.dec_lock_ref
+    cache._inflight_store_nodes = dict(inflight)
 
     inner = getattr(cache, "_inner_cache", None)
     target = inner if inner is not None else RadixCache
@@ -129,7 +143,10 @@ def test_completion_releases_only_its_unused_lookup(lookup_cache):
     cache.flexkv_connector.release_pending.assert_called_once_with(rid)
     # Another request's lookup and in-flight Store ownership are untouched.
     assert cache._load_markers == {other_rid: other_marker}
-    assert cache._inflight_store_nodes == {rid: store_node}
+    assert cache._inflight_store_nodes == inflight
+    if not hybrid:
+        assert cache._pending_store_copies == {rid: staged}
+    unlock.assert_not_called()
     cache.flexkv_connector.cancel_prefetch.assert_not_called()
 
 

@@ -13,6 +13,7 @@ import torch
 
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
+    CacheRequestOutcome,
     InitLoadBackParams,
     MatchPrefixParams,
     MatchResult,
@@ -666,6 +667,28 @@ def _make_layerwise_restore(loaded=4):
         best_match_node=req.last_node, host_hit_length=4, req=req
     )
     return cache, req, params, restored
+
+
+@pytest.mark.parametrize("entry", ["release_aborted_request", "finish"])
+def test_hybrid_abort_retains_store_source_until_transfer_completion(entry):
+    cache, req, _, _ = _make_layerwise_restore()
+    handle = req.cache_request_handle
+    store_key = _tracking_key(req.rid) + ":flexkv-store:0"
+    node, dec_params = object(), object()
+    cache._inflight_store_nodes[store_key] = (node, dec_params)
+
+    if entry == "finish":
+        cache.finish(handle, CacheRequestOutcome.ABORT)
+    else:
+        cache.release_aborted_request(handle)
+
+    # A launched D2H still reads the source slots: abort must not unlock them.
+    cache._inner_cache.dec_lock_ref.assert_not_called()
+    assert cache._inflight_store_nodes[store_key] == (node, dec_params)
+    cache.flexkv_connector.check_completed_stores.return_value = [store_key]
+    cache._drain_completed_stores()
+    cache._inner_cache.dec_lock_ref.assert_called_once_with(node, dec_params)
+    assert store_key not in cache._inflight_store_nodes
 
 
 def test_stale_hybrid_abort_does_not_cancel_a_new_request_attempt():
