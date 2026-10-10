@@ -117,6 +117,39 @@ def test_pool_accounting_delegates_to_inner_cache():
     assert cache.swa_protected_size() == 128
 
 
+@pytest.mark.parametrize(
+    "method, args",
+    [
+        ("resolve_node_handle", (17,)),
+        ("root_node_handle", ("tenant",)),
+        ("is_root", (17,)),
+        ("is_backuped", (17,)),
+        ("get_last_hash_value", (17,)),
+        ("get_prefix_hash_values", (17,)),
+        ("rotation_base_of", (17,)),
+        ("dfs_weight_order", ([17, 23],)),
+        ("evict_for_alloc", (object(),)),
+        ("swa_transient_size", ()),
+        ("swa_retain_floor", (object(),)),
+    ],
+)
+def test_unified_node_and_allocator_protocols_delegate_to_inner_cache(method, args):
+    # BasePrefixCache defaults would shadow __getattr__ forwarding to the
+    # NodeId-based UnifiedRadixCache.
+    inner = MagicMock()
+    expected = object()
+    getattr(inner, method).return_value = expected
+    cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)
+    cache._inner_cache = inner
+    cache.flexkv_connector = MagicMock()
+
+    assert getattr(cache, method)(*args) is expected
+
+    getattr(inner, method).assert_called_once_with(*args)
+    inner.evict.assert_not_called()
+    cache.flexkv_connector.check_completed_stores.assert_not_called()
+
+
 def test_evict_does_not_poll_cross_rank_store_completion():
     inner = MagicMock()
     inner.is_root.return_value = False
@@ -234,7 +267,7 @@ def test_restore_lease_blocks_duplicate_lookup_until_cache_commit():
         cache.match_prefix(params)
     inner.match_prefix.assert_called_once_with(params)
     connector.lookup_kv.assert_called_once()
-    assert req.rid not in cache._load_markers
+    assert _tracking_key(req.rid) not in cache._load_markers
 
     # init_load_back still fails loud: it allocates and starts a DMA, so a
     # second restore would leave two writers on one region.
