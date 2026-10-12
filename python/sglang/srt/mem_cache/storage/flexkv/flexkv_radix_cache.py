@@ -252,12 +252,8 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
                 f"FlexKV prefix rematch before restore commit: rid={_request_key(params.req.cache_request_handle)}"
             )
 
-        # FlexKV operates at page granularity — round the lookup query
-        # down to a multiple of ``page_size`` so the hit count we report
-        # back to sglang matches what FlexKV can actually serve.
-        if self.page_size != 1:
-            aligned_len = (len(key) // self.page_size) * self.page_size
-            key = key[:aligned_len]
+        # FlexKV operates at page granularity
+        key = key.page_aligned(self.page_size)
 
         base_res = super().match_prefix(params)
         if len(key) == 0:
