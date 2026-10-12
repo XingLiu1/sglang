@@ -260,11 +260,7 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             key = key[:aligned_len]
 
         base_res = super().match_prefix(params)
-        if (
-            len(key) == 0
-            or _namespace_kwargs(self.flexkv_connector, key.extra_key, key.cache_salt)
-            is None
-        ):
+        if len(key) == 0:
             return base_res
 
         device_value: torch.Tensor = base_res.device_indices
