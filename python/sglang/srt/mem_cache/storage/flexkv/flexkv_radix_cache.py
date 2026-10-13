@@ -350,7 +350,7 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         marker = self._load_markers.get(_request_key(req.cache_request_handle))
         if marker is None:
             return False
-        end = min(marker.value_numel + req.host_hit_length, len(marker.key))
+        end = marker.value_numel + req.host_hit_length
         key = self._restore_prefix_key(marker.key, end)
         owner = self._restoring_host_prefixes.get(key)
         if owner is None or owner == _request_key(req.cache_request_handle):
