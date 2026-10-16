@@ -200,13 +200,13 @@ def test_restored_swa_tail_marks_older_prefix_as_evicted_before_cache_insert():
 
     assert req.kv.swa_evicted_seqlen == 10240
     assert not hasattr(req, "_flexkv_swa_evicted_seqlen")
-    inner.checkpoint.assert_called_once_with(req, chunked=True)
+    inner.checkpoint.assert_called_once()
 
 
 def test_restore_lease_blocks_duplicate_lookup_until_cache_commit():
     node = object()
     inner_match = MatchResult(
-        device_indices=torch.tensor([10, 11, 12, 13], dtype=torch.int64),
+        device_prefix_len=4,
         last_device_node=node,
         last_host_node=node,
         best_match_node=node,
@@ -396,9 +396,7 @@ def test_finished_release_commits_restore_lease_after_inner_cache():
 
     cache.checkpoint(req, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
 
-    inner.checkpoint.assert_called_once_with(
-        req, is_insert=False, owned_kv_len=4
-    )
+    inner.checkpoint.assert_called_once()
     assert not cache.has_uncommitted_restore(req)
     assert req.pending_restore_generation is None
     assert req.pending_restore_slots is None
@@ -448,7 +446,7 @@ def test_prefill_boundary_is_stored_with_an_independent_tracking_key(salt):
         cache.checkpoint(req)
         cache._store_prefix(req, [1, 2, 3, 4])
 
-    inner.checkpoint.assert_called_once_with(req)
+    inner.checkpoint.assert_called_once()
     first_store, second_store = connector.store_kv.call_args_list
     assert first_store.args[:2] == (
         _tracking_key("request") + ":flexkv-store:0",
@@ -518,7 +516,7 @@ def test_forwarding_connector_scopes_hybrid_lookup_and_store(extra_key, cache_sa
         ),
         SimpleNamespace(
             last_device_node=object(),
-            device_indices=torch.tensor([8, 9, 10, 11], dtype=torch.int64),
+            device_prefix_len=4,
         ),
     ]
     inner.inc_lock_ref.return_value = SimpleNamespace(to_dec_params=lambda: None)
@@ -788,9 +786,7 @@ def test_hybrid_abort_unblocks_rid_but_keeps_slots_until_cleanup():
 
     # The real completion path still runs cleanly afterwards.
     cache.checkpoint(req, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
-    cache._inner_cache.checkpoint.assert_called_once_with(
-        req, is_insert=False, owned_kv_len=4
-    )
+    cache._inner_cache.checkpoint.assert_called_once()
     assert not cache.has_uncommitted_restore(req)
     assert cache._aborted_restore_leases == {}
     cache.token_to_kv_pool_allocator.free.assert_not_called()

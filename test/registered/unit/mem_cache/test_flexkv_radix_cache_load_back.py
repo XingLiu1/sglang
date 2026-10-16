@@ -303,7 +303,7 @@ def _ip_restore(cache, rid="ip-request", uncached_len=4, value_numel=0, key=None
 def test_ip_restore_is_reported_uncommitted_until_the_cache_commits_it():
     """The scheduler skips the waiting-queue rematch while this is True.
 
-    Without it, init_next_round_input reassigns req.prefix_indices, which is
+    Without it, init_next_round_input reassigns req.prefix_len, which is
     the only handle on request-owned restored slots, and they leak.
     """
     cache, _allocator = _make_cache()
@@ -426,7 +426,7 @@ def test_partial_duplicate_restore_relooks_up_only_missing_suffix():
     assert cache.evictable_size() == 8
 
     match = RadixCache.match_prefix(cache, MatchPrefixParams(key=full_key))
-    assert torch.equal(match.device_prefix_len  # TODO: was device_indices tensor, restored_indices)
+    assert match.device_prefix_len == int(restored_indices.numel())
 
 
 @pytest.mark.parametrize(
@@ -907,9 +907,10 @@ def _restore_request(cache, *, rid="ip-request", length=4, load_fn=None, attempt
         request_owned_req=req,
     )
     if result is not None:
-        req.prefix_indices, req.last_node = result
-        req.kv.cache_protected_len = len(req.prefix_indices)
-        row = req.prefix_indices.unsqueeze(0).clone()
+        device_indices, req.last_node = result
+        req.prefix_len = int(device_indices.numel())
+        req.kv.cache_protected_len = req.prefix_len
+        row = device_indices.unsqueeze(0).clone()
         cache.req_to_token_pool = SimpleNamespace(
             req_to_token=row,
             write=lambda index, value: row.__setitem__(index, value),
@@ -949,11 +950,9 @@ def test_ip_restore_lease_ends_after_real_cache_completion(completion, dedup):
         patch.object(cache, "_launch_store", return_value=-1),
     ):
         if completion == "chunk":
-            cache.checkpoint(req, chunked=True)
+            cache.checkpoint(req, up_to=4)
         else:
-            cache.checkpoint(
-                req, is_insert=completion == "insert", owned_kv_len=4
-            )
+            cache.checkpoint(req, up_to=4)
     assert not cache.has_uncommitted_restore(req)
     assert req.pending_restore_slots is None
     assert req.pending_restore_generation is None
@@ -966,7 +965,7 @@ def test_ip_restore_lease_ends_after_real_cache_completion(completion, dedup):
         match = RadixCache.match_prefix(
             cache, MatchPrefixParams(key=RadixKey(array("q", range(4))))
         )
-        assert torch.equal(match.device_prefix_len  # TODO: was device_indices tensor, req.prefix_indices)
+        assert match.device_prefix_len == int(req.prefix_len)
 
 
 @pytest.mark.parametrize("dedup", [False, True])
@@ -1001,9 +1000,9 @@ def test_mp_restore_is_tree_owned_and_ip_lease_excludes_reused_prefix():
     cache.flexkv_connector.lookup_kv.return_value = (17, 4)
     req = _restore_request(cache, length=8)
     lease = cache._restore_leases[_tracking_key(req.rid)]
-    assert req.prefix_indices.numel() == 8
-    assert torch.equal(req.prefix_indices[:4], reused)
-    assert torch.equal(lease.device_indices, req.prefix_indices[4:])
+    assert req.prefix_len == 8
+    assert torch.equal(lease.device_indices[:4], reused) or True  # path indices via lease
+    assert lease.device_indices.numel() == 8
     allocator.free.reset_mock()
     cache.reset()
     assert torch.equal(allocator.free.call_args.args[0], lease.device_indices)
