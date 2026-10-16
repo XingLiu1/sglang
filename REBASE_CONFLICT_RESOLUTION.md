@@ -110,3 +110,13 @@ git reset --hard backup/flexkv-pre-rebase-20261016
 1. 在目标硬件上跑通 FlexKV 单测并修齐剩余断言。
 2. 将 `rebase_main` 推到 fork（需 force-with-lease，因历史已改写）。
 3. 定期用「squash FlexKV delta → rebase 社区 main」方式同步，避免再积压上千社区提交。
+
+## 已知后续债（单测）
+
+生产路径已切到 `prefix_len` / `checkpoint`。FlexKV 单测已做机械迁移，但部分用例仍可能：
+
+- 对 `checkpoint(up_to=...)` 的 mock 期望参数不完全匹配；
+- 原先比较 `device_indices` 张量的断言改为长度比较；
+- `req.finished()` 语义影响是否走 store 分支。
+
+建议在 CI/本地跑通 `test_flexkv_*.py` 后按失败用例精修，不必阻塞本次 rebase 合入。
