@@ -1650,6 +1650,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             "before advancing"
         )
         updated_tracker = defaultdict(int, tracker)
+        evictable_before = self.component_evictable_size_.get(component_type, 0)
         self._begin_tracking_unbacked_tokens()
         try:
             step = component.evict_device_next_node(
@@ -1671,11 +1672,22 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 result.swa_backup_num_tokens = step.num_tokens
         else:
             result.node_id = step
+        # An internal SWA ghost can be structurally tombstoned while reclaiming
+        # zero physical slots. In that case the component returns no leaf, has
+        # no physical tracker delta, and queues no allocator free. The logical
+        # evictable-size change still proves that the LRU cursor advanced, so
+        # allocation-aware eviction must continue to the next live victim.
+        logical_progress = (
+            self.component_evictable_size_.get(component_type, 0) != evictable_before
+        )
         result.made_progress = (
             result.node_id is not None
             or result.mamba_backup_node_id is not None
             or result.swa_backup_node_id is not None
             or bool(result.tracker)
+            or logical_progress
+            or any(result.device_frees.values())
+            or any(result.host_frees.values())
         )
         return result
 

@@ -222,6 +222,8 @@ class SchedulePolicy:
             and get_disagg().disaggregation_mode != "decode"
         ):
             for r in waiting_queue:
+                if self.tree_cache.has_uncommitted_restore(r):
+                    continue
                 match_kv_cache(r, self.tree_cache)
 
         if self.policy == CacheAgnosticPolicy.FCFS:
@@ -346,6 +348,10 @@ class SchedulePolicy:
         self.waiting_queue_radix_tree.reset()
 
         for r in waiting_queue:
+            # Priority matching precedes admission and also rewrites prefix_len.
+            # Preserve request-owned restore slots until normal cache completion.
+            if self.tree_cache.has_uncommitted_restore(r):
+                continue
             prefix_ids = r.origin_input_ids + r.output_ids
             extra_key = r.extra_key
             cache_salt = r.cache_salt
@@ -1503,6 +1509,10 @@ class PrefillAdder:
                         return admission
                 req.prefix_len += req.host_loaded_length
                 if self.tree_cache.load_back_is_cache_owned():
+                    req.kv.cache_protected_len = req.prefix_len
+                elif not getattr(req, "_flexkv_uncached_restore", False):
+                    # FlexKV request-owned restores still protect admitted slots
+                    # until checkpoint commits them into the tree.
                     req.kv.cache_protected_len = req.prefix_len
 
             # Sharded pools cannot load host KV; reserve scratch after all other gates.

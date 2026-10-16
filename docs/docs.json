@@ -1033,7 +1033,8 @@
                   "docs/developer_guide/development_guide_using_docker",
                   "docs/developer_guide/development_jit_kernel_guide",
                   "docs/developer_guide/quantization_contribution_guide",
-                  "docs/developer_guide/layer_boundary"
+                  "docs/developer_guide/layer_boundary",
+                  "docs/developer_guide/flexkv-hybrid-cache-eviction"
                 ]
               },
               {

@@ -279,12 +279,19 @@ def checkpoint_kv_cache(req: Req, tree_cache: BasePrefixCache) -> None:
 
 
 def evict_from_tree_cache(
-    tree_cache: BasePrefixCache | None, num_tokens: int
+    tree_cache: BasePrefixCache | None,
+    num_tokens: int,
+    *,
+    swa_num_tokens: int | None = None,
 ) -> bool | None:
     if tree_cache is not None and tree_cache.supports_prefix_sharing():
-        return tree_cache.token_to_kv_pool_allocator.evict_to_free_tokens(
-            tree_cache, num_tokens
-        )
+        allocator = tree_cache.token_to_kv_pool_allocator
+        if swa_num_tokens is not None:
+            # FlexKV restores FULL and only the live SWA tail.
+            return allocator.evict_to_free_tokens(
+                tree_cache, num_tokens, swa_num_tokens=swa_num_tokens
+            )
+        return allocator.evict_to_free_tokens(tree_cache, num_tokens)
 
 
 def _evict_until_allocatable(

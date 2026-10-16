@@ -1186,6 +1186,12 @@ class Req(ReqDllmMixin):
         # Tokens [0, prefix_len) are already in the row, or, before allocation,
         # on the path to last_node; the next extend starts at prefix_len.
         self.prefix_len: int = 0
+        # A storage load-back remains request-owned until checkpoint transfers
+        # those slots into the prefix cache. Keep that ownership separate from
+        # prefix_len: rematch can rewrite the matched length and cannot identify
+        # an in-flight restore by itself.
+        self.pending_restore_generation: Optional[int] = None
+        self.pending_restore_slots: Optional[torch.Tensor] = None
         # TODO(ispobock): rename to last_device_node
         self.last_node: Any = None
         self.last_host_node: Any = None
