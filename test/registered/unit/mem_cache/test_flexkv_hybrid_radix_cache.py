@@ -61,7 +61,7 @@ FlexKVHybridRadixCache = _load_hybrid_cache_class()
 def test_namespaced_lookup_requires_connector_support(extra_key, cache_salt, supported):
     cache, req, _, _ = _make_layerwise_restore()
     result = MatchResult(
-        device_indices=torch.empty(0, dtype=torch.int64),
+        device_prefix_len=0,
         last_device_node=req.last_node,
         last_host_node=req.last_node,
         best_match_node=req.last_node,
@@ -200,7 +200,7 @@ def test_restored_swa_tail_marks_older_prefix_as_evicted_before_cache_insert():
 
     assert req.kv.swa_evicted_seqlen == 10240
     assert not hasattr(req, "_flexkv_swa_evicted_seqlen")
-    inner.cache_unfinished_req.assert_called_once_with(req, chunked=True)
+    inner.checkpoint.assert_called_once_with(req, chunked=True)
 
 
 def test_restore_lease_blocks_duplicate_lookup_until_cache_commit():
@@ -239,7 +239,7 @@ def test_restore_lease_blocks_duplicate_lookup_until_cache_commit():
     req = SimpleNamespace(
         rid="request",
         cache_request_handle=CacheRequestHandle("request", 0),
-        prefix_indices=inner_match.device_indices,
+        prefix_len=inner_match.device_prefix_len,
         last_node=node,
         kv=SimpleNamespace(cache_protected_len=4, swa_evicted_seqlen=0),
         pending_restore_generation=None,
@@ -394,9 +394,9 @@ def test_finished_release_commits_restore_lease_after_inner_cache():
         )
     }
 
-    cache.checkpoint(req, is_insert=False, owned_kv_len=4)
+    cache.checkpoint(req, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
 
-    inner.cache_finished_req.assert_called_once_with(
+    inner.checkpoint.assert_called_once_with(
         req, is_insert=False, owned_kv_len=4
     )
     assert not cache.has_uncommitted_restore(req)
@@ -448,7 +448,7 @@ def test_prefill_boundary_is_stored_with_an_independent_tracking_key(salt):
         cache.checkpoint(req)
         cache._store_prefix(req, [1, 2, 3, 4])
 
-    inner.cache_unfinished_req.assert_called_once_with(req)
+    inner.checkpoint.assert_called_once_with(req)
     first_store, second_store = connector.store_kv.call_args_list
     assert first_store.args[:2] == (
         _tracking_key("request") + ":flexkv-store:0",
@@ -511,7 +511,7 @@ def test_forwarding_connector_scopes_hybrid_lookup_and_store(extra_key, cache_sa
     inner.is_eagle = False
     inner.match_prefix.side_effect = [
         MatchResult(
-            device_indices=torch.empty(0, dtype=torch.int64),
+            device_prefix_len=0,
             last_device_node=req.last_node,
             last_host_node=req.last_node,
             best_match_node=req.last_node,
@@ -761,7 +761,7 @@ def test_hybrid_lease_mismatch_fails_before_inner_cache_mutation(method, mismatc
 
     with pytest.raises(RuntimeError, match="restore lease mismatch"):
         if method == "checkpoint":
-            cache.checkpoint(req, is_insert=False)
+            cache.checkpoint(req, up_to=0)  # was is_insert=False
         else:
             cache.checkpoint(req, chunked=True)
     getattr(cache._inner_cache, method).assert_not_called()
@@ -787,8 +787,8 @@ def test_hybrid_abort_unblocks_rid_but_keeps_slots_until_cleanup():
     cache.token_to_kv_pool_allocator.free.assert_not_called()
 
     # The real completion path still runs cleanly afterwards.
-    cache.checkpoint(req, is_insert=False, owned_kv_len=4)
-    cache._inner_cache.cache_finished_req.assert_called_once_with(
+    cache.checkpoint(req, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
+    cache._inner_cache.checkpoint.assert_called_once_with(
         req, is_insert=False, owned_kv_len=4
     )
     assert not cache.has_uncommitted_restore(req)
@@ -835,12 +835,12 @@ def test_hybrid_old_abort_cleanup_preserves_reused_rid_with_real_inner_cache():
     ]
     allocator.free_full_segments.side_effect = allocator.free_segments.side_effect
     inner.req_to_token_pool = SimpleNamespace(req_to_token=old_slots.unsqueeze(0))
-    cache.checkpoint(old, is_insert=False, owned_kv_len=4)
+    cache.checkpoint(old, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
     assert live == set(new_slots.tolist())
     assert cache._restore_leases[_tracking_key(new.rid)].req is new
     assert cache._aborted_restore_leases == {}
     inner.req_to_token_pool.req_to_token = new_slots.unsqueeze(0)
-    cache.checkpoint(new, is_insert=False, owned_kv_len=4)
+    cache.checkpoint(new, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
     cache.reset()
     assert not live
 

@@ -138,7 +138,7 @@ def test_completion_releases_only_its_unused_lookup(lookup_cache):
     inner = getattr(cache, "_inner_cache", None)
     target = inner if inner is not None else RadixCache
     with patch.object(target, "checkpoint"):
-        cache.checkpoint(req, is_insert=False, owned_kv_len=8)
+        cache.checkpoint(req, up_to=8)  # was is_insert=False; ensure req.finished() is False in test setup
 
     cache.flexkv_connector.release_pending.assert_called_once_with(rid)
     # Another request's lookup and in-flight Store ownership are untouched.

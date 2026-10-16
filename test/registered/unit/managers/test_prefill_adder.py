@@ -1075,7 +1075,7 @@ class TestPrefillAdder(CustomTestCase):
             rem_chunk_tokens=0,
         )
         req = self.create_mock_req("host-hit-waiter", 0, max_new_tokens=1)
-        req.prefix_indices = []
+        req.prefix_len = 0
         req.full_untruncated_fill_ids = list(range(28_864))
         req.host_hit_length = 576
         req.last_node = MagicMock()
@@ -1961,7 +1961,7 @@ class TestPrefillAdder(CustomTestCase):
                     req, has_chunked_req=False, truncation_align_size=None
                 )
                 self.assertEqual(adder.can_run_list, [req])
-                self.assertEqual(len(req.prefix_indices), 12)
+                self.assertEqual(req.prefix_len, 12)
                 self.assertEqual(req.kv.cache_protected_len, 4 if request_owned else 12)
 
 

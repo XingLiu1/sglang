@@ -127,14 +127,14 @@ def test_namespaced_completion_does_not_publish_unscoped_host_kv(extra_key, cach
             RadixCache,
             "match_prefix",
             return_value=MatchResult(
-                device_indices=torch.empty(0, dtype=torch.int64),
+                device_prefix_len=0,
                 last_device_node=cache.root_node,
                 last_host_node=cache.root_node,
                 best_match_node=cache.root_node,
             ),
         ) as match,
     ):
-        cache.checkpoint(req, owned_kv_len=4)
+        cache.checkpoint(req, up_to=4)
 
     finish.assert_called_once_with(req, is_insert=True, owned_kv_len=4)
     match.assert_not_called()
@@ -318,7 +318,7 @@ def test_ip_restore_is_reported_uncommitted_until_the_cache_commits_it():
             {"get_spec": lambda: SimpleNamespace(speculative_eagle_topk=None)},
         ),
     ):
-        cache.checkpoint(req, is_insert=False, owned_kv_len=0)
+        cache.checkpoint(req, up_to=0)  # was is_insert=False; ensure req.finished() is False in test setup
 
     assert cache.has_uncommitted_restore(req) is False
     assert req._flexkv_uncached_restore is False
@@ -426,7 +426,7 @@ def test_partial_duplicate_restore_relooks_up_only_missing_suffix():
     assert cache.evictable_size() == 8
 
     match = RadixCache.match_prefix(cache, MatchPrefixParams(key=full_key))
-    assert torch.equal(match.device_indices, restored_indices)
+    assert torch.equal(match.device_prefix_len  # TODO: was device_indices tensor, restored_indices)
 
 
 @pytest.mark.parametrize(
@@ -475,7 +475,7 @@ def test_forwarding_connector_scopes_lookup_relookup_and_store(extra_key, cache_
             "torch.cuda.stream", side_effect=lambda _stream: contextlib.nullcontext()
         ),
     ):
-        cache.checkpoint(finished, owned_kv_len=8)
+        cache.checkpoint(finished, up_to=8)
 
     lookups = _forwarded_namespaces(connector.kv_manager.get_match.call_args_list)
     assert lookups == [expected, expected]
@@ -542,7 +542,7 @@ def test_ip_match_is_lookup_only_until_request_admission():
 
     result = cache.match_prefix(MatchPrefixParams(key=key, req=req))
 
-    assert result.device_indices.numel() == 0
+    assert result.device_prefix_len == 0
     assert result.host_hit_length == 4
     assert result.cache_protected_len == 0
     assert result.last_device_node is cache.root_node
@@ -608,7 +608,7 @@ def test_finished_request_restores_tree_owned_boundary_before_duplicate_cleanup(
             {"get_spec": lambda: SimpleNamespace(speculative_eagle_topk=None)},
         ),
     ):
-        cache.checkpoint(req, owned_kv_len=0)
+        cache.checkpoint(req, up_to=0)
 
     assert observed_protected_lengths == [0]
     assert req._flexkv_uncached_restore is False
@@ -654,7 +654,7 @@ def test_finished_store_uses_radix_owned_slots_after_request_row_is_cleared(salt
             "torch.cuda.stream", side_effect=lambda _stream: contextlib.nullcontext()
         ),
     ):
-        cache.checkpoint(req, owned_kv_len=4)
+        cache.checkpoint(req, up_to=4)
 
     assert request_row.tolist() == [[0, 0, 0, 0]]
     stored = cache.flexkv_connector.store_kv.call_args.kwargs
@@ -717,7 +717,7 @@ def test_async_store_waits_for_event_then_uses_pinned_cpu_mapping(salt):
             "torch.cuda.stream", side_effect=lambda _stream: contextlib.nullcontext()
         ),
     ):
-        cache.checkpoint(req, owned_kv_len=4)
+        cache.checkpoint(req, up_to=4)
         cache.check_hicache_events()
         cache.flexkv_connector.store_kv.assert_not_called()
         assert list(cache._pending_store_copies) == [_tracking_key("async-store")]
@@ -966,7 +966,7 @@ def test_ip_restore_lease_ends_after_real_cache_completion(completion, dedup):
         match = RadixCache.match_prefix(
             cache, MatchPrefixParams(key=RadixKey(array("q", range(4))))
         )
-        assert torch.equal(match.device_indices, req.prefix_indices)
+        assert torch.equal(match.device_prefix_len  # TODO: was device_indices tensor, req.prefix_indices)
 
 
 @pytest.mark.parametrize("dedup", [False, True])
@@ -983,7 +983,7 @@ def test_abort_unblocks_rid_but_retains_slots_until_request_cleanup(dedup):
     assert cache._restore_prefix_by_rid == {}
     assert cache._restoring_host_prefixes == {}
     allocator.free.assert_not_called()
-    cache.checkpoint(req, is_insert=False, owned_kv_len=4)
+    cache.checkpoint(req, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
     released = allocator.free_segment.call_args.args[0]
     start = allocator.free_segment.call_args.kwargs["start_pos"]
     assert start == 0
@@ -1030,7 +1030,7 @@ def test_restore_lease_mismatch_fails_before_mutating_cache(mismatch, method, de
     # continuing here would free/insert these slots, then reset would free again.
     with pytest.raises(RuntimeError, match="restore lease mismatch"):
         if method == "checkpoint":
-            cache.checkpoint(req, is_insert=False, owned_kv_len=4)
+            cache.checkpoint(req, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
         else:
             cache.checkpoint(req)
     assert live == set(slots.tolist())
@@ -1334,14 +1334,14 @@ def test_aborted_request_cleanup_does_not_free_or_commit_reused_rid(dedup):
     new_pool = cache.req_to_token_pool
     live = _assert_allocator_free_once(allocator, torch.cat([old_slots, new_slots]))
     cache.req_to_token_pool = old_pool
-    cache.checkpoint(old, is_insert=False, owned_kv_len=4)
+    cache.checkpoint(old, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
     assert live == set(new_slots.tolist())
     assert cache._restore_leases[_tracking_key(new.rid)].req is new
     assert (_tracking_key(new.rid) in cache._restore_prefix_by_rid) is dedup
     assert (_tracking_key(new.rid) in cache._restoring_host_prefixes.values()) is dedup
     assert cache._aborted_restore_leases == {}
     cache.req_to_token_pool = new_pool
-    cache.checkpoint(new, is_insert=False, owned_kv_len=4)
+    cache.checkpoint(new, up_to=4)  # was is_insert=False; ensure req.finished() is False in test setup
     cache.reset()
     assert live == set()
 
@@ -1435,5 +1435,5 @@ def test_partial_tree_owned_restore_reports_atomic_admission_miss():
     assert node is cache.root_node
     # The completed MP prefix still belongs to the cache and remains reusable.
     matched = RadixCache.match_prefix(cache, MatchPrefixParams(key=key))
-    assert matched.device_indices.numel() == 4
+    assert matched.device_prefix_len == 4
     assert cache.evictable_size() == 4
