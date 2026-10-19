@@ -8,12 +8,17 @@ from __future__ import annotations
 
 import json
 import logging
+from array import array
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from sglang.srt.mem_cache.base_prefix_cache import CacheRequestHandle
+from sglang.srt.mem_cache.base_prefix_cache import (
+    CacheRequestHandle,
+    MatchPrefixParams,
+)
+from sglang.srt.mem_cache.radix_cache import RadixKey
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -157,18 +162,47 @@ class FlexKVCacheLifecycleMixin:
             raise RuntimeError(f"FlexKV failed to free restore allocations: {failed}")
 
     def prefetch_request(self, req: Req) -> None:
-        """Start queued prefetch without a foreground lookup or H2D allocation."""
-        # Foreground lookup runs after stop-and-drain, otherwise it could fetch
-        # the whole remote prefix before the prefetch policy gets a chance to stop.
+        """Start queued prefetch when device (L1) does not already cover the prefix.
+
+        Only SGLang's GPU radix is probed here: FlexKV prefetch cannot see L1
+        (``ignore_gpu``). A full L1 hit skips FlexKV entirely. Otherwise one
+        ``prefetch_async`` jointly matches L2+Mooncake; L2-only hits produce no
+        REMOTE transfer. L2→L1 H2D stays on the admission ``lookup_kv`` path.
+        """
+        # Do not call match_prefix with req= here: that path may plan host work.
         req.init_next_round_input(tree_cache=None, cow_mamba=False)
         fill_ids = req.full_untruncated_fill_ids
         if not fill_ids:
             return
         match_end = req._compute_max_prefix_len(len(fill_ids))
+        raw = list(fill_ids[:match_end])
+        aligned_len = len(raw) // self.page_size * self.page_size
+        if aligned_len <= 0:
+            return
+        raw = raw[:aligned_len]
+
+        key = RadixKey(
+            array("q", raw),
+            req.extra_key,
+            is_bigram=bool(getattr(self, "is_eagle", False)),
+            cache_salt=req.cache_salt,
+        )
+        device_len = int(
+            self.match_prefix(MatchPrefixParams(key=key, req=None)).device_prefix_len
+        )
+        if device_len >= aligned_len:
+            logger.info(
+                "[FlexKV] skip prefetch: device hit rid=%s tokens=%d",
+                req.rid,
+                device_len,
+            )
+            return
+
         self.prefetch_from_storage(
             req.cache_request_handle,
             None,
-            fill_ids[:match_end],
+            raw[device_len:],
+            matched_prefix_tokens=raw[:device_len],
             extra_key=req.extra_key,
             cache_salt=req.cache_salt,
         )

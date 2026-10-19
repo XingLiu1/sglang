@@ -165,6 +165,46 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
     def _req_prefix_length(self, req: Req) -> int:
         return int(req.prefix_len)
 
+    def path_device_indices(self, node: Any) -> torch.Tensor:
+        # BasePrefixCache defines this, so __getattr__ cannot forward it.
+        return self._inner_cache.path_device_indices(node)
+
+    def prefix_device_indices(self, req: Req) -> torch.Tensor:
+        """Tree path plus request-owned FlexKV restore slots not yet checkpointed.
+
+        Hybrid restore keeps host/storage hits on ``pending_restore_slots`` until
+        the normal checkpoint inserts them. ``alloc_for_extend`` reads this
+        method before that insert, so the path alone is shorter than
+        ``req.prefix_len`` on a pure L3 hit (same pattern as LMCache).
+        """
+        path = self._inner_cache.path_device_indices(req.last_node)
+        pending = getattr(req, "pending_restore_slots", None)
+        if pending is None or pending.numel() == 0:
+            assert len(path) >= req.prefix_len, (req.rid, len(path), req.prefix_len)
+            return path[: req.prefix_len]
+
+        # After load-back, cache_protected_len is the pre-restore device match.
+        # Truncate so we never double-count tree slots against pending.
+        if getattr(req, "_flexkv_uncached_restore", False):
+            tree_len = int(getattr(req.kv, "cache_protected_len", 0) or 0)
+            path = path[:tree_len]
+
+        pending = pending.to(dtype=torch.int64)
+        if path.numel() == 0:
+            indices = pending
+        else:
+            if pending.device != path.device:
+                pending = pending.to(device=path.device)
+            indices = torch.cat([path, pending])
+        assert len(indices) >= req.prefix_len, (
+            req.rid,
+            len(indices),
+            req.prefix_len,
+            int(path.numel()),
+            int(pending.numel()),
+        )
+        return indices[: req.prefix_len]
+
     def _req_last_location(self, req: Req) -> torch.Tensor:
         prefix_length = self._req_prefix_length(req)
         if prefix_length <= 0:
@@ -197,6 +237,7 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
 
         token_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         token_mask[device_length:] = True
+        # One compute GET (Mooncake forces ignore_remote → local L2/SSD).
         _, hit_length = self.flexkv_connector.lookup_kv(
             token_ids,
             token_mask,

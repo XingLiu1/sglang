@@ -66,9 +66,20 @@ def _forwarding_connector():
     connector.sync_ready_store_rids.side_effect = lambda rids: list(rids)
     kv_manager = connector.kv_manager
 
-    def lookup_kv(token_ids, token_mask, rid=None, sglang_req_id=None, namespace=None):
+    def lookup_kv(
+        token_ids,
+        token_mask,
+        rid=None,
+        sglang_req_id=None,
+        namespace=None,
+        *,
+        cpu_only=None,
+    ):
         kv_manager.get_match(
-            token_ids=token_ids, token_mask=token_mask, namespace=namespace
+            token_ids=token_ids,
+            token_mask=token_mask,
+            namespace=namespace,
+            cpu_only=cpu_only,
         )
         return 17, int(token_mask.sum())
 
@@ -437,7 +448,10 @@ def test_forwarding_connector_scopes_lookup_relookup_and_store(extra_key, cache_
     connector = _forwarding_connector()
     cache.flexkv_connector = connector
     request_row = torch.tensor([[0] * 8], dtype=torch.int64)
-    cache.req_to_token_pool = SimpleNamespace(req_to_token=request_row)
+    cache.req_to_token_pool = SimpleNamespace(
+        req_to_token=request_row,
+        write=lambda index, value: request_row.__setitem__(index, value),
+    )
     expected = _namespace_kwargs(connector, extra_key, cache_salt)["namespace"]
     first_page = RadixKey(array("q", range(4)), extra_key, cache_salt=cache_salt)
     full_key = RadixKey(array("q", range(8)), extra_key, cache_salt=cache_salt)
@@ -458,7 +472,17 @@ def test_forwarding_connector_scopes_lookup_relookup_and_store(extra_key, cache_
         cache_request_handle=CacheRequestHandle("finished", 0),
         origin_input_ids=array("q", range(8)),
         output_ids=array("q"),
-        kv=SimpleNamespace(kv_committed_len=8, req_pool_idx=0, cache_protected_len=0),
+        full_untruncated_fill_ids=array("q", range(8)),
+        finished=lambda: True,
+        priority=0,
+        kv=SimpleNamespace(
+            kv_committed_len=8,
+            req_pool_idx=0,
+            cache_protected_len=0,
+            cache_inserted_len=0,
+            swa_evicted_seqlen=0,
+            swa_evict_floor=0,
+        ),
         extra_key=extra_key,
         cache_salt=cache_salt,
         last_node=cache.root_node,
@@ -466,6 +490,9 @@ def test_forwarding_connector_scopes_lookup_relookup_and_store(extra_key, cache_
     )
     request_row[0] = torch.arange(200, 208)
     with (
+        # Base radix checkpoint API needs a full Req; this test only checks
+        # that FlexKV store keeps the same namespace as lookup/relookup.
+        patch.object(RadixCache, "checkpoint"),
         patch.dict(
             FlexKVRadixCache.checkpoint.__globals__,
             {"get_spec": lambda: SimpleNamespace(speculative_eagle_topk=None)},

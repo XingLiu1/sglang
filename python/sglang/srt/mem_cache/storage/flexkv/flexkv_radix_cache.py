@@ -300,7 +300,8 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             return base_res
 
         # token_mask=True for tokens NOT on device — FlexKV decides
-        # which of those it can serve.
+        # which of those it can serve. One compute GET: Mooncake forces
+        # ignore_remote, so this is effectively an L2 (+SSD) match.
         token_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         token_mask[device_len:] = True
 
@@ -607,6 +608,36 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
     # ------------------------------------------------------------------
     # checkpoint (STORE) — community replaced cache_finished/unfinished_req
     # ------------------------------------------------------------------
+
+    def prefix_device_indices(self, req: Req) -> torch.Tensor:
+        """Tree path plus request-owned IP/layerwise restore slots.
+
+        Layerwise (IP) load-back keeps fresh slots on ``pending_restore_slots``
+        until checkpoint inserts them. ``last_node`` already reflects any
+        refreshed/reused tree prefix; pending is only the newly allocated tail.
+        MP mode inserts into the tree before returning, so ``pending`` is empty.
+        """
+        path = self.path_device_indices(req.last_node)
+        pending = getattr(req, "pending_restore_slots", None)
+        if pending is None or pending.numel() == 0:
+            assert len(path) >= req.prefix_len, (req.rid, len(path), req.prefix_len)
+            return path[: req.prefix_len]
+
+        pending = pending.to(dtype=torch.int64)
+        if path.numel() == 0:
+            indices = pending
+        else:
+            if pending.device != path.device:
+                pending = pending.to(device=path.device)
+            indices = torch.cat([path, pending])
+        assert len(indices) >= req.prefix_len, (
+            req.rid,
+            len(indices),
+            req.prefix_len,
+            int(path.numel()),
+            int(pending.numel()),
+        )
+        return indices[: req.prefix_len]
 
     def on_release(self, req: Req, *, checkpointed: bool) -> None:
         if not checkpointed:

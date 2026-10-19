@@ -167,8 +167,12 @@ def test_flexkv_radix_prefetch_request_page_aligns_and_launches():
     )
     cache = module.FlexKVRadixCache.__new__(module.FlexKVRadixCache)
     cache.page_size = 2
-    cache.flexkv_connector = MagicMock()
+    cache.is_eagle = False
+    cache.flexkv_connector = MagicMock(supports_cache_namespace=True)
     cache.flexkv_connector.prefetch_async = MagicMock(return_value=1)
+    cache.match_prefix = MagicMock(
+        return_value=SimpleNamespace(device_prefix_len=0)
+    )
 
     req = MagicMock()
     req.rid = "r1"
@@ -182,6 +186,7 @@ def test_flexkv_radix_prefetch_request_page_aligns_and_launches():
     cache.prefetch_request(req)
 
     req.init_next_round_input.assert_called_once_with(tree_cache=None, cow_mamba=False)
+    cache.flexkv_connector.lookup_kv.assert_not_called()
     args, _kwargs = cache.flexkv_connector.prefetch_async.call_args
     assert args[0] == _tracking_key("r1")
     assert list(args[1]) == [1, 2, 3, 4]

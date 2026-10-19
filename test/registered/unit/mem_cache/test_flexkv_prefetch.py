@@ -3,6 +3,7 @@
 import ast
 import json
 import logging
+from array import array
 from pathlib import Path
 from types import MethodType
 from types import SimpleNamespace as NS
@@ -15,7 +16,9 @@ import torch
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
     CacheRequestOutcome,
+    MatchPrefixParams,
 )
+from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import _namespace_kwargs
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -58,6 +61,9 @@ def method(path, cls, name):
         "TreeNode": object,
         "CacheRequestHandle": CacheRequestHandle,
         "CacheRequestOutcome": CacheRequestOutcome,
+        "MatchPrefixParams": MatchPrefixParams,
+        "RadixKey": RadixKey,
+        "array": array,
         "_request_key": lambda handle: _tracking_key(handle.rid, handle.attempt_id),
         "Req": object,
         "Any": Any,
@@ -108,7 +114,13 @@ def test_scheduler_starts_flexkv_without_hicache_storage_backend():
     "path,cls", [(SOURCE, "FlexKVRadixCache"), (HYBRID, "FlexKVHybridRadixCache")]
 )
 def test_queue_entry_does_not_lookup_remote_or_allocate_restore(path, cls):
-    cache = NS(prefetch_from_storage=Mock())
+    """L1 miss launches one FlexKV prefetch; no separate L2 probe."""
+    cache = NS(
+        prefetch_from_storage=Mock(),
+        page_size=1,
+        is_eagle=False,
+        match_prefix=Mock(return_value=NS(device_prefix_len=0)),
+    )
     req = NS(
         rid="r",
         cache_request_handle=CacheRequestHandle("r", 0),
@@ -124,9 +136,35 @@ def test_queue_entry_does_not_lookup_remote_or_allocate_restore(path, cls):
         req.cache_request_handle,
         None,
         list(range(9)),
+        matched_prefix_tokens=[],
         extra_key=None,
         cache_salt=None,
     )
+
+
+@pytest.mark.parametrize(
+    "path,cls", [(SOURCE, "FlexKVRadixCache"), (HYBRID, "FlexKVHybridRadixCache")]
+)
+def test_prefetch_skips_when_device_covers(path, cls):
+    cache = NS(
+        prefetch_from_storage=Mock(),
+        page_size=1,
+        is_eagle=False,
+        flexkv_connector=Mock(),
+        match_prefix=Mock(return_value=NS(device_prefix_len=8)),
+    )
+    req = NS(
+        rid="r",
+        cache_request_handle=CacheRequestHandle("r", 0),
+        full_untruncated_fill_ids=list(range(8)),
+        extra_key=None,
+        cache_salt=None,
+        init_next_round_input=Mock(),
+        _compute_max_prefix_len=lambda n: n,
+    )
+    method(path, cls, "prefetch_request")(cache, req)
+    cache.prefetch_from_storage.assert_not_called()
+    cache.flexkv_connector.lookup_kv.assert_not_called()
 
 
 def test_abort_releases_flexkv_without_hicache_enabled():

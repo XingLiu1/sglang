@@ -203,6 +203,58 @@ def test_restored_swa_tail_marks_older_prefix_as_evicted_before_cache_insert():
     inner.checkpoint.assert_called_once()
 
 
+def test_prefix_device_indices_appends_pending_restore_slots():
+    """Pure L3 hit: tree path is empty until checkpoint; alloc must see restore."""
+    root = object()
+    empty = torch.empty((0,), dtype=torch.int64)
+    device_path = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
+    restored = torch.tensor([20, 21, 22, 23], dtype=torch.int64)
+
+    inner = MagicMock()
+    inner.path_device_indices.side_effect = lambda node: (
+        device_path if node is not root else empty
+    )
+
+    cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)
+    cache._inner_cache = inner
+    cache.device = torch.device("cpu")
+
+    # Pure storage / Mooncake hit: device prefix 0, restore owns the prefix.
+    pure_l3 = SimpleNamespace(
+        rid="pure-l3",
+        last_node=root,
+        prefix_len=4,
+        pending_restore_slots=restored,
+        _flexkv_uncached_restore=True,
+        kv=SimpleNamespace(cache_protected_len=0),
+    )
+    assert torch.equal(cache.prefix_device_indices(pure_l3), restored)
+
+    # Partial device hit + host restore.
+    mixed = SimpleNamespace(
+        rid="mixed",
+        last_node=object(),
+        prefix_len=8,
+        pending_restore_slots=restored,
+        _flexkv_uncached_restore=True,
+        kv=SimpleNamespace(cache_protected_len=4),
+    )
+    assert torch.equal(
+        cache.prefix_device_indices(mixed),
+        torch.cat([device_path, restored]),
+    )
+
+    # No pending restore: path alone must satisfy prefix_len.
+    device_only = SimpleNamespace(
+        rid="device-only",
+        last_node=object(),
+        prefix_len=4,
+        pending_restore_slots=None,
+        kv=SimpleNamespace(cache_protected_len=4),
+    )
+    assert torch.equal(cache.prefix_device_indices(device_only), device_path)
+
+
 def test_restore_lease_blocks_duplicate_lookup_until_cache_commit():
     node = object()
     inner_match = MatchResult(
@@ -478,9 +530,20 @@ def _forwarding_connector():
     connector.supports_cache_namespace = True
     kv_manager = connector.kv_manager
 
-    def lookup_kv(token_ids, token_mask, rid=None, sglang_req_id=None, namespace=None):
+    def lookup_kv(
+        token_ids,
+        token_mask,
+        rid=None,
+        sglang_req_id=None,
+        namespace=None,
+        *,
+        cpu_only=None,
+    ):
         kv_manager.get_match(
-            token_ids=token_ids, token_mask=token_mask, namespace=namespace
+            token_ids=token_ids,
+            token_mask=token_mask,
+            namespace=namespace,
+            cpu_only=cpu_only,
         )
         return 17, int(token_mask.sum())
 
@@ -505,6 +568,8 @@ def test_forwarding_connector_scopes_hybrid_lookup_and_store(extra_key, cache_sa
     req.extra_key, req.cache_salt = extra_key, cache_salt
     expected = _namespace_kwargs(connector, extra_key, cache_salt)["namespace"]
     inner = cache._inner_cache
+    store_node = object()
+    store_indices = torch.arange(4, dtype=torch.int64)
     inner.is_root.return_value = False
     inner.is_eagle = False
     inner.match_prefix.side_effect = [
@@ -515,10 +580,11 @@ def test_forwarding_connector_scopes_hybrid_lookup_and_store(extra_key, cache_sa
             best_match_node=req.last_node,
         ),
         SimpleNamespace(
-            last_device_node=object(),
+            last_device_node=store_node,
             device_prefix_len=4,
         ),
     ]
+    inner.path_device_indices.return_value = store_indices
     inner.inc_lock_ref.return_value = SimpleNamespace(to_dec_params=lambda: None)
     key = RadixKey(array("q", range(4)), extra_key, cache_salt=cache_salt)
 
