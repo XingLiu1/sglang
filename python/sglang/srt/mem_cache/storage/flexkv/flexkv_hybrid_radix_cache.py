@@ -676,8 +676,8 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
     def take_events(self) -> list[Any]:
         return self._inner_cache.take_events()
 
-    def swa_reprefill_tail_tokens(self) -> int:
-        return self._inner_cache.swa_reprefill_tail_tokens()
+    def swa_reprefill_tail_tokens(self, req=None) -> int:
+        return self._inner_cache.swa_reprefill_tail_tokens(req)
 
     def supports_streaming_session(self) -> bool:
         return self._inner_cache.supports_streaming_session()
