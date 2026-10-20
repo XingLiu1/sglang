@@ -32,6 +32,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchResult,
 )
 from sglang.srt.mem_cache.radix_cache import RadixKey
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import (
     FlexKVCacheLifecycleMixin,
     _namespace_kwargs,
@@ -563,7 +564,10 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
         boundary = getattr(req, "_flexkv_swa_evicted_seqlen", None)
         if boundary is None or req.kv is None:
             return
-        req.kv.swa_evicted_seqlen = max(req.kv.swa_evicted_seqlen, boundary)
+        req.kv.set_evicted_seqlen(
+            ComponentType.SWA,
+            max(req.kv.get_evicted_seqlen(ComponentType.SWA), boundary),
+        )
         del req._flexkv_swa_evicted_seqlen
 
     def evict(self, params: EvictParams) -> EvictResult:
