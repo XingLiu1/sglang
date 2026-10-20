@@ -33,6 +33,13 @@ from sglang.srt.mem_cache.utils import (
 )
 
 
+def _to_signed_int64(value: int) -> int:
+    # FlexKV and radixshmem hash to uint64; this wire is int64 (hash_str_to_int64).
+    # Stores and removes both pass through here, so a block's two events still match.
+    value = int(value) & 0xFFFFFFFFFFFFFFFF
+    return value - 2**64 if value >= 2**63 else value
+
+
 class KVCacheEventRecorder:
     """Collects KV placement events for one cache.
 
@@ -174,6 +181,58 @@ class KVCacheEventRecorder:
 
         if block_hashes:
             self.enqueue(BlockRemoved(block_hashes=block_hashes, medium=medium))
+
+    def record_external_store(
+        self,
+        block_hashes: list,
+        token_ids: list,
+        parent_block_hash=None,
+        medium=None,
+    ) -> None:
+        """Blocks held by a tier with no radix node here, hashed in that tier's scheme.
+
+        ``block_hashes[i]`` covers ``token_ids[i]`` in path order; the tokens let a
+        content-hashing router map these hashes onto its own keys.
+        """
+        if not self.enabled or not block_hashes:
+            return
+        if len(block_hashes) != len(token_ids):
+            raise ValueError(
+                f"external store: {len(block_hashes)} hashes but "
+                f"{len(token_ids)} token blocks"
+            )
+        if medium is None:
+            medium = StorageMedium.GPU
+        if parent_block_hash is not None:
+            parent_block_hash = _to_signed_int64(parent_block_hash)
+
+        for block_hash, page_tokens in zip(block_hashes, token_ids):
+            page_tokens = list(page_tokens)
+            block_hash = _to_signed_int64(block_hash)
+            self.enqueue(
+                BlockStored(
+                    block_hashes=[block_hash],
+                    parent_block_hash=parent_block_hash,
+                    token_ids=page_tokens,
+                    block_size=len(page_tokens),
+                    lora_id=None,
+                    medium=medium,
+                )
+            )
+            parent_block_hash = block_hash
+
+    def record_external_remove(self, block_hashes: list, medium=None) -> None:
+        """Hash-only; the consumer resolves it through the matching store's tokens."""
+        if not self.enabled or not block_hashes:
+            return
+        if medium is None:
+            medium = StorageMedium.GPU
+        self.enqueue(
+            BlockRemoved(
+                block_hashes=[_to_signed_int64(h) for h in block_hashes],
+                medium=medium,
+            )
+        )
 
     def record_all_cleared(self) -> None:
         if not self.enabled:

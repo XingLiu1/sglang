@@ -57,6 +57,7 @@ from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import (
     _namespace_kwargs,
     _request_key,
 )
+from sglang.srt.mem_cache.storage.flexkv.kv_event_bridge import FlexKVEventBridge
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -196,6 +197,12 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         # layerwise H2D engine, but not yet committed to the radix tree.
         self._init_restore_state()
         self._node_lock = threading.Lock()
+
+        # Publish the FlexKV host tier on this cache's own KV event recorder.
+        self._kv_event_bridge = FlexKVEventBridge(
+            self.flexkv_connector, self.kv_events, self.page_size
+        )
+        self._kv_event_bridge.start()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -892,6 +899,8 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         self._drain_completed_stores()
         self.flexkv_connector.drain_launched_loads()
         self._launch_pending_stores()
+        # Published by the scheduler's publish_kv_events on this same tick.
+        self._kv_event_bridge.drain()
 
     def _drain_completed_stores(self) -> None:
         completed_rids = self.flexkv_connector.check_completed_stores()

@@ -20,6 +20,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 )
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
 from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import _namespace_kwargs
+from sglang.srt.mem_cache.storage.flexkv.kv_event_bridge import FlexKVEventBridge
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
@@ -29,7 +30,7 @@ def _tracking_key(rid, attempt=0):
     return json.dumps([rid, attempt], separators=(",", ":"))
 
 
-def _load_hybrid_cache_class():
+def _load_hybrid_cache_class() -> ModuleType:
     """Load the wrapper without requiring the optional FlexKV package."""
     module_name = "_flexkv_hybrid_radix_cache_under_test"
     connector_name = "flexkv.integration.sglang.connector"
@@ -50,10 +51,11 @@ def _load_hybrid_cache_class():
             spec.loader.exec_module(module)
     finally:
         sys.modules.pop(module_name, None)
-    return module.FlexKVHybridRadixCache
+    return module
 
 
-FlexKVHybridRadixCache = _load_hybrid_cache_class()
+_hybrid_module = _load_hybrid_cache_class()
+FlexKVHybridRadixCache = _hybrid_module.FlexKVHybridRadixCache
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -175,6 +177,7 @@ def test_scheduler_hook_polls_cross_rank_store_completion():
     cache.flexkv_connector = connector
     cache._node_lock = threading.Lock()
     cache._inflight_store_nodes = {}
+    cache._kv_event_bridge = FlexKVEventBridge(connector, None, page_size=1)
 
     cache.check_hicache_events()
 
@@ -884,3 +887,97 @@ def test_hybrid_reset_fences_connector_before_reclaiming_slots(failure):
         assert cache.has_uncommitted_restore(req)
         cache.token_to_kv_pool_allocator.free.assert_not_called()
         cache._inner_cache.reset.assert_not_called()
+
+
+def _unified_cache_with_events():
+    from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
+    from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+    from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
+    from sglang.srt.mem_cache.unified_cache.components import ComponentType
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    kv_pool = MHATokenToKVPool(
+        size=64,
+        page_size=1,
+        dtype=torch.float16,
+        head_num=2,
+        head_dim=8,
+        layer_num=1,
+        device="cpu",
+        enable_memory_saver=False,
+    )
+    allocator = TokenToKVPoolAllocator(
+        size=64, dtype=torch.float16, device="cpu", kvcache=kv_pool, need_sort=False
+    )
+    req_pool = ReqToTokenPool(
+        size=8, max_context_len=128, device="cpu", enable_memory_saver=False
+    )
+    return UnifiedRadixCache(
+        CacheInitParams(
+            disable=False,
+            req_to_token_pool=req_pool,
+            token_to_kv_pool_allocator=allocator,
+            page_size=1,
+            eviction_policy="lru",
+            enable_kv_cache_events=True,
+            tree_components=(ComponentType.FULL,),
+        )
+    )
+
+
+def test_hybrid_bridge_binds_the_unified_tree_core_recorder():
+    """The hybrid wrapper must publish FlexKV events on the recorder its inner
+    UnifiedRadixCache drains; binding the class-level None silently disables them."""
+    inner = _unified_cache_with_events()
+    recorder = _hybrid_module._event_recorder(inner)
+    assert recorder is not None and recorder.enabled
+    assert recorder is inner.tree_core.kv_events
+
+    # Shaped like flexkv.common.kv_events.BlocksStored; the bridge dispatches on the name.
+    class BlocksStored(SimpleNamespace):
+        pass
+
+    stored = BlocksStored(
+        block_hashes=[7],
+        token_ids=[[1]],
+        parent_block_hash=None,
+        block_size=1,
+        medium="CPU",
+    )
+    connector = SimpleNamespace(
+        start_kv_events=lambda: True, take_kv_events=lambda: [stored]
+    )
+    bridge = FlexKVEventBridge(connector, recorder, page_size=1)
+    bridge.start()
+    assert bridge.active
+    inner.take_events()
+    bridge.drain()
+    assert [type(e).__name__ for e in inner.take_events()] == ["BlockStored"]
+
+
+def test_external_store_and_remove_hash_identically_above_int63():
+    """FlexKV hashes are uint64 and the wire is int64; a store and the remove
+    that retracts it must land on the same signed value or the router keeps
+    the block forever. Per-block stores must also chain parent to child."""
+    from sglang.srt.disaggregation.kv_events import StorageMedium
+    from sglang.srt.mem_cache.events import KVCacheEventRecorder
+
+    recorder = KVCacheEventRecorder(enabled=True, page_size=2)
+    high, higher = 2**64 - 5, 2**63 + 1
+    recorder.record_external_store(
+        block_hashes=[high, higher],
+        token_ids=[[1, 2], [3, 4]],
+        parent_block_hash=2**63,
+        medium=StorageMedium.CPU,
+    )
+    recorder.record_external_remove(
+        block_hashes=[high, higher], medium=StorageMedium.CPU
+    )
+    stored, removed = recorder.take()
+
+    # Coalescing into one event only happens when each parent is the previous hash.
+    assert stored.block_hashes == [-5, higher - 2**64]
+    assert stored.parent_block_hash == -(2**63)
+    assert stored.token_ids == [1, 2, 3, 4]
+    assert removed.block_hashes == stored.block_hashes
+    assert stored.medium == removed.medium == StorageMedium.CPU

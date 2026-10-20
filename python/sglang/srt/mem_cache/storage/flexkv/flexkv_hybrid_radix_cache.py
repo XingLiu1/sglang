@@ -37,14 +37,25 @@ from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import (
     _namespace_kwargs,
     _request_key,
 )
+from sglang.srt.mem_cache.storage.flexkv.kv_event_bridge import FlexKVEventBridge
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+    from sglang.srt.mem_cache.events import KVCacheEventRecorder
     from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
+
+
+def _event_recorder(inner_cache: BasePrefixCache) -> Optional[KVCacheEventRecorder]:
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    # UnifiedRadixCache keeps its recorder on the tree core; the base attribute stays None.
+    if isinstance(inner_cache, UnifiedRadixCache):
+        return inner_cache.tree_core.kv_events
+    return inner_cache.kv_events
 
 
 @dataclass
@@ -140,6 +151,13 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
         self._node_lock = threading.Lock()
 
         self._swa_grid_tokens = envs.SGLANG_FLEXKV_SWA_GRID_PAGES.get() * self.page_size
+        # Share the inner cache's recorder so the router sees one ordered stream.
+        self._kv_event_bridge = FlexKVEventBridge(
+            self.flexkv_connector,
+            _event_recorder(inner_cache),
+            self.page_size,
+        )
+        self._kv_event_bridge.start()
 
     def reset(self) -> None:
         # FlexKV still owns references to GPU source/destination slots while an
@@ -535,6 +553,7 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
     def check_hicache_events(self) -> None:
         self._drain_completed_stores()
         self.flexkv_connector.drain_launched_loads()
+        self._kv_event_bridge.drain()
 
     def _drain_completed_stores(self) -> None:
         completed = self.flexkv_connector.check_completed_stores()

@@ -22,6 +22,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 )
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
 from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import _namespace_kwargs
+from sglang.srt.mem_cache.storage.flexkv.kv_event_bridge import FlexKVEventBridge
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
@@ -204,6 +205,9 @@ def _make_cache(page_size=4):
     cache.flexkv_connector.is_store_sync_leader = True
     cache.flexkv_connector.sync_ready_store_rids.side_effect = lambda rids: list(rids)
     cache._node_lock = threading.Lock()
+    cache._kv_event_bridge = FlexKVEventBridge(
+        cache.flexkv_connector, None, page_size=page_size
+    )
     return cache, allocator
 
 
