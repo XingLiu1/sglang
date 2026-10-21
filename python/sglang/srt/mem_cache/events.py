@@ -212,12 +212,12 @@ class KVCacheEventRecorder:
 
     def record_store(
         self, node: Any, medium=None, *, session_id: Optional[str] = None
-    ) -> None:
-        # One BlockStored per ``page_size`` chunk.
+    ) -> list[int]:
+        # One BlockStored per ``page_size`` chunk; returns the published hashes.
         # ``medium`` defaults to StorageMedium.GPU but callers may override
         # for lower-tier insertions (e.g. StorageMedium.CPU for host/L2 cache).
         if not self.enabled:
-            return
+            return []
         if medium is None:
             medium = StorageMedium.GPU
 
@@ -234,6 +234,7 @@ class KVCacheEventRecorder:
             else self.lora_names.get(node.key.extra_key)
         )
 
+        published = []
         page_index = 0
         logical_len = len(node.key)
         is_bigram = node.key.is_bigram
@@ -267,8 +268,10 @@ class KVCacheEventRecorder:
                 )
             )
 
+            published.append(block_hash)
             parent_block_hash = block_hash
             page_index += 1
+        return published
 
     def record_remove(self, node: Any, medium=None) -> None:
         # One BlockRemoved per radix node.
@@ -301,6 +304,12 @@ class KVCacheEventRecorder:
 
         if block_hashes:
             self.enqueue(BlockRemoved(block_hashes=block_hashes, medium=medium))
+
+    def record_remove_hashes(self, block_hashes: list[int], medium) -> None:
+        # For hashes whose node is gone; they must be as record_store returned them.
+        if not self.enabled or not block_hashes:
+            return
+        self.enqueue(BlockRemoved(block_hashes=list(block_hashes), medium=medium))
 
     def record_all_cleared(self) -> None:
         if not self.enabled:
