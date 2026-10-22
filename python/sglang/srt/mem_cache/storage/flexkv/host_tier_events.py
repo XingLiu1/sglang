@@ -2,7 +2,7 @@
 
 A KV-aware router (dynamo, llm-d) only sees this engine's KV events, so a
 prefix offloaded to FlexKV looks like a miss once the device drops it. After a
-FlexKV store completes, the stored node is published as ``medium=CPU``, the
+FlexKV store completes, the stored path is published as ``medium=CPU``, the
 same way HiCache reports its host tier, so the hashes match the device events.
 
 FlexKV reports no evictions here. The budget keeps the router's CPU view
@@ -40,11 +40,14 @@ class HostTierEventBudget:
         return len(self._advertised)
 
     def record_store(self, node: Any) -> None:
+        """Publish the whole root-to-``node`` path: FlexKV stored every page of it."""
         if self._recorder is None or not self._recorder.enabled:
             return
-        for block_hash in self._recorder.record_store(node, medium=StorageMedium.CPU):
-            self._advertised[block_hash] = None
-            self._advertised.move_to_end(block_hash)
+        for path_node in _path_from_root(node):
+            published = self._recorder.record_store(path_node, medium=StorageMedium.CPU)
+            for block_hash in published:
+                self._advertised[block_hash] = None
+                self._advertised.move_to_end(block_hash)
         excess = len(self._advertised) - max(int(self._capacity_blocks()), 0)
         if excess > 0:
             evicted = [self._advertised.popitem(last=False)[0] for _ in range(excess)]
@@ -53,3 +56,13 @@ class HostTierEventBudget:
     def clear(self) -> None:
         # The owning cache's reset publishes AllBlocksCleared itself.
         self._advertised.clear()
+
+
+def _path_from_root(node: Any) -> list:
+    # The root is the only node without a parent; it holds no pages.
+    path = []
+    while node is not None and node.parent is not None:
+        path.append(node)
+        node = node.parent
+    path.reverse()
+    return path

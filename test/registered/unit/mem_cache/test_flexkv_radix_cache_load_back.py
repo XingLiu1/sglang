@@ -1505,6 +1505,26 @@ def test_host_tier_budget_retracts_exactly_what_it_published():
     assert budget.advertised_blocks == 2
 
 
+def test_host_tier_budget_advertises_the_whole_path_not_just_the_tail_node():
+    """FlexKV stores the full root-to-node path; when a shared prefix splits the
+    radix node, advertising only the tail leaves the stored prefix invisible."""
+    cache = RadixCache.create_simulated(page_size=2, enable_kv_cache_events=True)
+    cache.insert(InsertParams(key=RadixKey(array("q", [1, 2, 3, 4])), value=None))
+    leaf = cache.insert(
+        InsertParams(key=RadixKey(array("q", [1, 2, 5, 6])), value=None)
+    ).last_device_node
+    assert leaf.parent is not cache.root_node  # [1, 2] was split off
+    cache.take_events()
+    budget = HostTierEventBudget(cache.kv_events, capacity_blocks=lambda: 64)
+
+    budget.record_store(leaf)
+
+    (stored,) = cache.take_events()
+    assert stored.medium == StorageMedium.CPU
+    assert stored.parent_block_hash is None and len(stored.block_hashes) == 2
+    assert budget.advertised_blocks == 2
+
+
 def test_host_tier_budget_refreshes_a_restored_block_instead_of_evicting_it():
     cache, a, b = _stored_nodes()
     budget = HostTierEventBudget(cache.kv_events, capacity_blocks=lambda: 4)
