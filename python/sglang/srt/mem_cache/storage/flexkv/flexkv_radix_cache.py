@@ -57,6 +57,7 @@ from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import (
     _namespace_kwargs,
     _request_key,
 )
+from sglang.srt.mem_cache.storage.flexkv.host_tier_events import HostTierEventBudget
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -107,6 +108,9 @@ class _PendingStoreCopy:
 
 class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
     """RadixCache extended with FlexKV host-tier IO."""
+
+    # RadixCache.__init__ calls reset() before this is assigned.
+    _host_tier_events: Optional[HostTierEventBudget] = None
 
     def __init__(
         self,
@@ -196,6 +200,10 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         # layerwise H2D engine, but not yet committed to the radix tree.
         self._init_restore_state()
         self._node_lock = threading.Lock()
+        self._host_tier_events = HostTierEventBudget(
+            self.kv_events,
+            capacity_blocks=lambda: self.flexkv_connector.cache_config.num_cpu_blocks,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -221,6 +229,8 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
                 self._inflight_store_nodes.clear()
                 self._pending_store_launches.clear()
                 self._pending_store_copies.clear()
+        if self._host_tier_events is not None:
+            self._host_tier_events.clear()
         super().reset()
 
     def release_host_resources(self) -> None:
@@ -919,6 +929,9 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             for rid in completed_rids:
                 node = self._inflight_store_nodes.pop(rid, None)
                 if node is not None:
+                    # Before dec_lock_ref: an unlocked node may be evicted or split.
+                    if self._host_tier_events is not None:
+                        self._host_tier_events.record_store(node)
                     self.dec_lock_ref(node)
 
     # ------------------------------------------------------------------

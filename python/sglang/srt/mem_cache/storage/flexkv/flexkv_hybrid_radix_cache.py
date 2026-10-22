@@ -38,14 +38,25 @@ from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import (
     _namespace_kwargs,
     _request_key,
 )
+from sglang.srt.mem_cache.storage.flexkv.host_tier_events import HostTierEventBudget
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+    from sglang.srt.mem_cache.events import KVCacheEventRecorder
     from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
+
+
+def _event_recorder(inner_cache: BasePrefixCache) -> Optional[KVCacheEventRecorder]:
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    # UnifiedRadixCache keeps its recorder on the tree core; the base attribute stays None.
+    if isinstance(inner_cache, UnifiedRadixCache):
+        return inner_cache.tree_core.kv_events
+    return inner_cache.kv_events
 
 
 @dataclass
@@ -76,6 +87,7 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
     # pages of prefill puts snapshots on a grid instead; 0 keeps turn-end only.
     # Declared here so __getattr__ never forwards it to the inner cache.
     _swa_grid_tokens: int = 0
+    _host_tier_events: Optional[HostTierEventBudget] = None
 
     def __init__(
         self,
@@ -141,6 +153,10 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
         self._node_lock = threading.Lock()
 
         self._swa_grid_tokens = envs.SGLANG_FLEXKV_SWA_GRID_PAGES.get() * self.page_size
+        self._host_tier_events = HostTierEventBudget(
+            _event_recorder(inner_cache),
+            capacity_blocks=lambda: self.flexkv_connector.cache_config.num_cpu_blocks,
+        )
 
     def reset(self) -> None:
         # FlexKV still owns references to GPU source/destination slots while an
@@ -152,6 +168,8 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
         self._load_markers.clear()
         with self._node_lock:
             self._inflight_store_nodes.clear()
+        if self._host_tier_events is not None:
+            self._host_tier_events.clear()
 
     def release_host_resources(self) -> None:
         self.token_to_kv_pool_host.destroy()
@@ -590,6 +608,11 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
                 tracked = self._inflight_store_nodes.pop(rid, None)
                 if tracked is not None:
                     node, dec_params = tracked
+                    # Before dec_lock_ref: an unlocked node may be evicted or split.
+                    if self._host_tier_events is not None:
+                        self._host_tier_events.record_store(
+                            self._inner_cache.resolve_node_handle(node)
+                        )
                     self._inner_cache.dec_lock_ref(node, dec_params)
 
     def release_aborted_request(self, handle: CacheRequestHandle) -> None:

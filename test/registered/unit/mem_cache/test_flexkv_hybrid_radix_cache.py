@@ -15,11 +15,15 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
     CacheRequestOutcome,
     InitLoadBackParams,
+    InsertParams,
     MatchPrefixParams,
     MatchResult,
 )
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
 from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import _namespace_kwargs
+from sglang.srt.mem_cache.storage.flexkv.host_tier_events import HostTierEventBudget
+from sglang.srt.mem_cache.unified_cache.components import ComponentType
+from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
@@ -29,7 +33,7 @@ def _tracking_key(rid, attempt=0):
     return json.dumps([rid, attempt], separators=(",", ":"))
 
 
-def _load_hybrid_cache_class():
+def _load_hybrid_cache_class() -> ModuleType:
     """Load the wrapper without requiring the optional FlexKV package."""
     module_name = "_flexkv_hybrid_radix_cache_under_test"
     connector_name = "flexkv.integration.sglang.connector"
@@ -50,10 +54,11 @@ def _load_hybrid_cache_class():
             spec.loader.exec_module(module)
     finally:
         sys.modules.pop(module_name, None)
-    return module.FlexKVHybridRadixCache
+    return module
 
 
-FlexKVHybridRadixCache = _load_hybrid_cache_class()
+_hybrid_module = _load_hybrid_cache_class()
+FlexKVHybridRadixCache = _hybrid_module.FlexKVHybridRadixCache
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -946,3 +951,74 @@ def test_hybrid_reset_fences_connector_before_reclaiming_slots(failure):
         assert cache.has_uncommitted_restore(req)
         cache.token_to_kv_pool_allocator.free.assert_not_called()
         cache._inner_cache.reset.assert_not_called()
+
+
+def _unified_cache_with_events(page_size=2):
+    from sglang.srt.mem_cache.allocator.paged import PagedTokenToKVPoolAllocator
+    from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+    from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
+
+    kv_pool = MHATokenToKVPool(
+        size=64,
+        page_size=page_size,
+        dtype=torch.float16,
+        head_num=2,
+        head_dim=8,
+        layer_num=1,
+        device="cpu",
+        enable_memory_saver=False,
+    )
+    return UnifiedRadixCache(
+        CacheInitParams(
+            disable=False,
+            req_to_token_pool=ReqToTokenPool(
+                size=8, max_context_len=128, device="cpu", enable_memory_saver=False
+            ),
+            token_to_kv_pool_allocator=PagedTokenToKVPoolAllocator(
+                size=64,
+                page_size=page_size,
+                dtype=torch.float16,
+                device="cpu",
+                kvcache=kv_pool,
+                need_sort=False,
+            ),
+            page_size=page_size,
+            eviction_policy="lru",
+            enable_kv_cache_events=True,
+            tree_components=(ComponentType.FULL,),
+        )
+    )
+
+
+def test_hybrid_completed_store_reaches_the_unified_tree_core_recorder():
+    """UnifiedRadixCache publishes from tree_core.kv_events while its
+    BasePrefixCache kv_events stays None; binding that None silently drops
+    every host-tier event for hybrid models."""
+    from sglang.srt.disaggregation.kv_events import BlockStored, StorageMedium
+
+    inner = _unified_cache_with_events()
+    recorder = _hybrid_module._event_recorder(inner)
+    assert recorder is inner.tree_core.kv_events and recorder.enabled
+
+    node_id = inner.insert(
+        InsertParams(
+            key=RadixKey(array("q", [1, 2, 3, 4])),
+            value=torch.arange(4, dtype=torch.int64),
+        )
+    ).last_device_node
+    inner.take_events()
+    cache = FlexKVHybridRadixCache.__new__(FlexKVHybridRadixCache)
+    cache._inner_cache = inner
+    cache.flexkv_connector = MagicMock()
+    cache.flexkv_connector.check_completed_stores.return_value = ["r"]
+    cache._node_lock = threading.Lock()
+    cache._host_tier_events = HostTierEventBudget(recorder, capacity_blocks=lambda: 64)
+    cache._inflight_store_nodes = {"r": (node_id, MagicMock())}
+    inner.dec_lock_ref = MagicMock()
+
+    cache._drain_completed_stores()
+
+    (stored,) = inner.take_events()
+    assert isinstance(stored, BlockStored) and stored.medium == StorageMedium.CPU
+    assert len(stored.block_hashes) == 2
+

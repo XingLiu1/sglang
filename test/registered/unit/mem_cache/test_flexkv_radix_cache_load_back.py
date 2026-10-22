@@ -12,16 +12,24 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
+from sglang.srt.disaggregation.kv_events import (
+    BlockRemoved,
+    BlockStored,
+    StorageMedium,
+)
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
     CacheRequestOutcome,
     EvictParams,
     InitLoadBackParams,
+    InsertParams,
     MatchPrefixParams,
     MatchResult,
 )
+from sglang.srt.mem_cache.events import KVCacheEventRecorder
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
 from sglang.srt.mem_cache.storage.flexkv.flexkv_cache_lifecycle import _namespace_kwargs
+from sglang.srt.mem_cache.storage.flexkv.host_tier_events import HostTierEventBudget
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
@@ -1463,3 +1471,98 @@ def test_partial_tree_owned_restore_reports_atomic_admission_miss():
     matched = RadixCache.match_prefix(cache, MatchPrefixParams(key=key))
     assert matched.device_prefix_len == 4
     assert cache.evictable_size() == 4
+
+
+def _stored_nodes(page_size=2):
+    cache = RadixCache.create_simulated(
+        page_size=page_size, enable_kv_cache_events=True
+    )
+    a = cache.insert(
+        InsertParams(key=RadixKey(array("q", [1, 2, 3, 4])), value=None)
+    ).last_device_node
+    b = cache.insert(
+        InsertParams(key=RadixKey(array("q", [9, 8, 7, 6])), value=None)
+    ).last_device_node
+    cache.take_events()
+    return cache, a, b
+
+
+def test_host_tier_budget_retracts_exactly_what_it_published():
+    """The budget's removes must carry the hashes record_store put on the wire,
+    or the router keeps every CPU block it was ever told about."""
+    cache, a, b = _stored_nodes()
+    budget = HostTierEventBudget(cache.kv_events, capacity_blocks=lambda: 2)
+
+    budget.record_store(a)
+    (stored_a,) = cache.take_events()
+    assert stored_a.medium == StorageMedium.CPU
+    assert len(stored_a.block_hashes) == 2
+
+    budget.record_store(b)
+    stored_b, removed = cache.take_events()
+    assert stored_b.medium == removed.medium == StorageMedium.CPU
+    assert removed.block_hashes == stored_a.block_hashes
+    assert budget.advertised_blocks == 2
+
+
+def test_host_tier_budget_advertises_the_whole_path_not_just_the_tail_node():
+    """FlexKV stores the full root-to-node path; when a shared prefix splits the
+    radix node, advertising only the tail leaves the stored prefix invisible."""
+    cache = RadixCache.create_simulated(page_size=2, enable_kv_cache_events=True)
+    cache.insert(InsertParams(key=RadixKey(array("q", [1, 2, 3, 4])), value=None))
+    leaf = cache.insert(
+        InsertParams(key=RadixKey(array("q", [1, 2, 5, 6])), value=None)
+    ).last_device_node
+    assert leaf.parent is not cache.root_node  # [1, 2] was split off
+    cache.take_events()
+    budget = HostTierEventBudget(cache.kv_events, capacity_blocks=lambda: 64)
+
+    budget.record_store(leaf)
+
+    (stored,) = cache.take_events()
+    assert stored.medium == StorageMedium.CPU
+    assert stored.parent_block_hash is None and len(stored.block_hashes) == 2
+    assert budget.advertised_blocks == 2
+
+
+def test_host_tier_budget_refreshes_a_restored_block_instead_of_evicting_it():
+    cache, a, b = _stored_nodes()
+    budget = HostTierEventBudget(cache.kv_events, capacity_blocks=lambda: 4)
+    budget.record_store(a)
+    budget.record_store(b)
+    b_hashes = cache.take_events()[-1].block_hashes
+    budget.record_store(a)
+    assert not any(isinstance(e, BlockRemoved) for e in cache.take_events())
+    assert budget.advertised_blocks == 4
+
+    # a was refreshed last, so shrinking the budget retracts b, not a.
+    budget._capacity_blocks = lambda: 2
+    budget.record_store(a)
+    (removed,) = [e for e in cache.take_events() if isinstance(e, BlockRemoved)]
+    assert removed.block_hashes == b_hashes
+
+
+def test_completed_store_is_advertised_on_the_cpu_tier_before_unlock():
+    """Publishing after dec_lock_ref would read a node eviction may already
+    have split; the CPU event must be queued while the store still pins it."""
+    cache, _ = _make_cache(page_size=2)
+    cache.kv_events = KVCacheEventRecorder(enabled=True, page_size=2)
+    node = RadixCache.insert(
+        cache, InsertParams(key=RadixKey(array("q", [5, 6, 7, 8])), value=None)
+    ).last_device_node
+    cache.take_events()
+    cache._host_tier_events = HostTierEventBudget(
+        cache.kv_events, capacity_blocks=lambda: 64
+    )
+    queued_at_unlock = []
+    cache.dec_lock_ref = MagicMock(
+        side_effect=lambda _n: queued_at_unlock.extend(cache.kv_events._queue)
+    )
+    cache._inflight_store_nodes["r"] = node
+    cache.flexkv_connector.check_completed_stores.return_value = ["r"]
+
+    cache._drain_completed_stores()
+
+    (stored,) = queued_at_unlock
+    assert isinstance(stored, BlockStored) and stored.medium == StorageMedium.CPU
+    assert len(stored.block_hashes) == 2
