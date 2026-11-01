@@ -6,6 +6,7 @@ import torch
 
 from sglang.srt.managers.schedule_policy import AddReqResult, PrefillAdder
 from sglang.srt.mem_cache.prefill_budget import PrefillBudget
+from sglang.srt.runtime_context import get_context
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -92,6 +93,12 @@ class RestoredReq:
 
 class TestRestoredTailAdmission(CustomTestCase):
     """A crowded batch must defer a short restore before I/O and a delayer vote."""
+
+    def setUp(self):
+        super().setUp()
+        override = get_context().override_server_args()
+        override.install()
+        self.addCleanup(override.restore)
 
     def adder(self, cache, chunk=32768, capacity=10**9, exact=False):
         with patch(
