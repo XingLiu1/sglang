@@ -934,6 +934,15 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         self.flexkv_connector.cancel_prefetch(rid)
 
     @property
+    def prefer_complete_restored_requests(self) -> bool:
+        """Opt in to completing ordinary layerwise restored tails in one batch."""
+        return (
+            os.getenv("FLEXKV_WHOLE_RESTORE_TAIL", "0") == "1"
+            and self._mode is FlexKVMode.IP
+            and not getattr(self.flexkv_connector._sync_ctx, "is_pp_active", False)
+        )
+
+    @property
     def hicache_storage_pass_prefix_keys(self) -> bool:
         # We pass token ids, not opaque key strings, so no prefix-key
         # accounting in the scheduler.
