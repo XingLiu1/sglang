@@ -660,6 +660,7 @@ class PrefillAdder:
 
         if self.rem_chunk_tokens is not None:
             self.rem_chunk_tokens -= num_mixed_decode_tokens
+        self.initial_chunk_tokens = self.rem_chunk_tokens
         self.memory_budget = token_to_kv_pool_allocator.create_prefill_budget(
             tree_cache, num_mixed_decode_tokens=num_mixed_decode_tokens
         )
@@ -1435,6 +1436,19 @@ class PrefillAdder:
                 return AddReqResult.OTHER
             max_new_tokens = 0
         elif chunk_tokens_limit is not None and chunk_fit_tokens > chunk_tokens_limit:
+            # Defer a restored short tail before any load-back or delayer vote.
+            # A fresh batch can compute it whole without retaining the restored
+            # prefix across an artificial split. Empty batches still progress.
+            if (
+                self.can_run_list
+                and host_hit_length > 0
+                and getattr(self.tree_cache, "prefer_complete_restored_requests", False)
+                and not self.is_hybrid_swa
+                and not self.is_hybrid_ssm_cache
+                and self.initial_chunk_tokens is not None
+                and 0 < chunk_fit_tokens <= self.initial_chunk_tokens
+            ):
+                return AddReqResult.OTHER
             if (
                 has_chunked_req
                 and get_schedule().schedule_policy == "shortest-prefill-first"
