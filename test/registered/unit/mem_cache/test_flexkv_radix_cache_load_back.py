@@ -188,6 +188,7 @@ def _make_cache(page_size=4):
     cache.__dict__.update(base_cache.__dict__)
     cache._mode = FlexKVRadixCache.match_prefix.__globals__["FlexKVMode"].IP
     cache.flexkv_connector = MagicMock()
+    del cache.flexkv_connector.sync_load_ready
     cache.store_stream = MagicMock()
     cache._load_markers = {}
     cache._defer_duplicate_restores = False
@@ -243,6 +244,27 @@ def _load(cache, key, value_numel, uncached_len, rid):
     )
     assert result is not None
     return result, load_fn
+
+
+@pytest.mark.parametrize("local_ready", [False, True])
+def test_peer_allocation_failure_cancels_before_any_restore(local_ready):
+    cache, allocator = _make_cache()
+    if not local_ready:
+        allocator.alloc.side_effect = None
+        allocator.alloc.return_value = None
+    cache.flexkv_connector.sync_load_ready = MagicMock(return_value=False)
+    load_fn = MagicMock()
+    result = cache._allocate_and_load(
+        key=RadixKey(array("q", range(4))), value_numel=0, uncached_len=4,
+        last_node=cache.root_node, tracking_rid=_tracking_key("vote"),
+        sglang_req_id="vote", load_fn=load_fn,
+    )
+    assert result is None
+    cache.flexkv_connector.sync_load_ready.assert_called_once_with(local_ready)
+    cache.flexkv_connector.release_pending.assert_called_once_with(_tracking_key("vote"))
+    load_fn.assert_not_called()
+    assert allocator.free.call_count == int(local_ready)
+    assert cache._restore_leases == {}
 
 
 def test_duplicate_restore_reuses_live_node_without_creating_stale_leaf():
