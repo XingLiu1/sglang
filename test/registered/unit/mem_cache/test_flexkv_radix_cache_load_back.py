@@ -220,7 +220,11 @@ def test_ip_restore_defers_only_with_opt_in_and_capability(monkeypatch, enabled,
     key = _tracking_key("prepared", 3)
     cache._load_markers[key] = SimpleNamespace(key=RadixKey(array("q", range(4))), value_numel=0)
     slots = torch.arange(4)
-    cache._allocate_and_load = MagicMock(side_effect=lambda **kw: (kw["load_fn"](slots), cache.root_node))
+    def allocate_and_load(**kw):
+        kw["load_fn"](slots)
+        return slots, cache.root_node
+
+    cache._allocate_and_load = MagicMock(side_effect=allocate_and_load)
     cache.init_load_back(InitLoadBackParams(best_match_node=cache.root_node, host_hit_length=4, req=req))
     call_args = cache.flexkv_connector.start_load_kv_layerwise.call_args
     assert call_args.args[0] == key

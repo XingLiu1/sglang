@@ -70,6 +70,7 @@ def _scheduler_case(*, chunked=False, flexkv=False, defer_shared=None, capture=N
         check_hicache_events=MagicMock(),
         check_prefetch_progress=MagicMock(return_value=True),
         pop_prefetch_loaded_span=MagicMock(return_value=(0, None)),
+        storage_prefetch_retries=None,
     )
     if defer_shared is not None:
         cache.should_defer_shared_restore = defer_shared
