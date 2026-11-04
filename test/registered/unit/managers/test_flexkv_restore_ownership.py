@@ -264,7 +264,14 @@ def test_scheduler_flushes_only_admitted_requests_before_batch_creation():
         __hash__ = object.__hash__
 
     reqs = [
-        Request(rid=str(i), cache_request_handle=CacheRequestHandle(str(i), 0), init_next_round_input=MagicMock(), mamba_pool_idx=None, beam_group=None, kv=SimpleNamespace(holds_mamba=False))
+        Request(
+            rid=str(i),
+            cache_request_handle=CacheRequestHandle(str(i), 0),
+            init_next_round_input=MagicMock(),
+            mamba_pool_idx=None,
+            beam_group=None,
+            kv=SimpleNamespace(holds_mamba=False),
+        )
         for i in range(3)
     ]
     scheduler.waiting_queue = reqs
