@@ -366,6 +366,12 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         if key is not None and self._restoring_host_prefixes.get(key) == rid:
             self._restoring_host_prefixes.pop(key)
 
+    def launch_pending_loads(self, reqs: list[Req]) -> None:
+        """Submit prepared restores after admission, before forward setup."""
+        flush = getattr(self.flexkv_connector, "flush_layerwise_loads", None)
+        if self._mode is FlexKVMode.IP and callable(flush):
+            flush([_request_key(req.cache_request_handle) for req in reqs])
+
     def init_load_back(  # type: ignore[override]
         self,
         params: InitLoadBackParams,
@@ -392,10 +398,17 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             )
 
         request_owned_req = req if self._mode is FlexKVMode.IP else None
+        batch_layerwise = (
+            self._mode is FlexKVMode.IP
+            and os.environ.get("FLEXKV_BATCH_LAYERWISE_RESTORE", "0") == "1"
+            and callable(getattr(self.flexkv_connector, "flush_layerwise_loads", None))
+        )
         load_fn = (
             (
                 lambda slot_mapping: self.flexkv_connector.start_load_kv_layerwise(
-                    _request_key(req.cache_request_handle), slot_mapping
+                    _request_key(req.cache_request_handle),
+                    slot_mapping,
+                    **({"defer_launch": True} if batch_layerwise else {}),
                 )[0]
             )
             if self._mode is FlexKVMode.IP

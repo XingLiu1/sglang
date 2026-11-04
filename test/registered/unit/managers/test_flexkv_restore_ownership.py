@@ -54,7 +54,7 @@ class AddReqResult(Enum):
     NO_TOKEN = auto()
 
 
-def _scheduler_case(*, chunked=False, flexkv=False, defer_shared=None):
+def _scheduler_case(*, chunked=False, flexkv=False, defer_shared=None, capture=None):
     req = SimpleNamespace(
         rid="restore",
         cache_request_handle=CacheRequestHandle("restore", 0),
@@ -127,6 +127,8 @@ def _scheduler_case(*, chunked=False, flexkv=False, defer_shared=None):
             "DisaggregationMode": SimpleNamespace(PREFILL="prefill"),
         },
     )
+    if capture is not None:
+        capture.update(scheduler=scheduler, namespace=run.__globals__)
     running = SimpleNamespace(reqs=[], batch_is_full=False, is_empty=lambda: True)
     return req, leased, adder, lambda: run(scheduler, None, running)
 
@@ -250,3 +252,57 @@ def test_priority_matching_preserves_uncommitted_restore(cache_aware):
     leased.clear()
     invoke()
     matcher.assert_called_once()
+
+
+def test_scheduler_flushes_only_admitted_requests_before_batch_creation():
+    state = {}
+    _, leased, adder, run = _scheduler_case(flexkv=True, capture=state)
+    scheduler, namespace = state["scheduler"], state["namespace"]
+
+    class Request(SimpleNamespace):
+        __hash__ = object.__hash__
+
+    reqs = [
+        Request(rid=str(i), cache_request_handle=CacheRequestHandle(str(i), 0), init_next_round_input=MagicMock(), mamba_pool_idx=None, beam_group=None, kv=SimpleNamespace(holds_mamba=False))
+        for i in range(3)
+    ]
+    scheduler.waiting_queue = reqs
+    leased.clear()
+    order = []
+
+    def admit(req, *args, **kwargs):
+        order.append(("admit", req.rid))
+        if req is reqs[-1]:
+            return AddReqResult.NO_TOKEN
+        adder.can_run_list.append(req)
+        return AddReqResult.CONTINUE
+
+    adder.add_one_req.side_effect = admit
+    adder.preempt_list = []
+    adder.new_chunked_req = None
+    scheduler.tree_cache.launch_pending_loads = lambda rs: order.append(
+        ("flush", [r.rid for r in rs])
+    )
+    scheduler.model_config = object()
+    scheduler.enable_overlap = True
+    scheduler.spec_algorithm = object()
+    namespace["set_time_batch"] = lambda *a: None
+
+    class BatchCreationReached(Exception):
+        pass
+
+    def init_new(*args, **kwargs):
+        order.append(("batch", [r.rid for r in args[0]]))
+        raise BatchCreationReached
+
+    namespace["ScheduleBatch"] = SimpleNamespace(init_new=init_new)
+    with pytest.raises(BatchCreationReached):
+        run()
+    assert order == [
+        ("admit", "0"),
+        ("admit", "1"),
+        ("admit", "2"),
+        ("flush", ["0", "1"]),
+        ("batch", ["0", "1"]),
+    ]
+    assert scheduler.waiting_queue == [reqs[-1]]

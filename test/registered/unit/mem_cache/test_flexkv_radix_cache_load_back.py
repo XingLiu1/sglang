@@ -207,6 +207,29 @@ def _make_cache(page_size=4):
     return cache, allocator
 
 
+@pytest.mark.parametrize("enabled,compatible", [(True, True), (False, True), (True, False)])
+def test_ip_restore_defers_only_with_opt_in_and_capability(monkeypatch, enabled, compatible):
+    cache, _ = _make_cache()
+    monkeypatch.setenv("FLEXKV_BATCH_LAYERWISE_RESTORE", "1" if enabled else "0")
+    if not compatible:
+        del cache.flexkv_connector.flush_layerwise_loads
+    cache.flexkv_connector.start_load_kv_layerwise.return_value = (4, 0)
+    handle = CacheRequestHandle("prepared", 3)
+    req = SimpleNamespace(rid="prepared", cache_request_handle=handle, fill_ids=list(range(8)))
+    key = _tracking_key("prepared", 3)
+    cache._load_markers[key] = SimpleNamespace(key=RadixKey(array("q", range(4))), value_numel=0)
+    slots = torch.arange(4)
+    cache._allocate_and_load = MagicMock(side_effect=lambda **kw: (kw["load_fn"](slots), cache.root_node))
+    cache.init_load_back(InitLoadBackParams(best_match_node=cache.root_node, host_hit_length=4, req=req))
+    call_args = cache.flexkv_connector.start_load_kv_layerwise.call_args
+    assert call_args.args[0] == key
+    assert call_args.kwargs == ({"defer_launch": True} if enabled and compatible else {})
+    peer = SimpleNamespace(rid="gpu-hit", cache_request_handle=CacheRequestHandle("gpu-hit", 2))
+    cache.launch_pending_loads([req, peer])
+    if compatible:
+        cache.flexkv_connector.flush_layerwise_loads.assert_called_once_with([key, _tracking_key("gpu-hit", 2)])
+
+
 def _load(cache, key, value_numel, uncached_len, rid):
     load_fn = MagicMock(side_effect=lambda slots: int(slots.numel()))
     result = cache._allocate_and_load(
