@@ -69,12 +69,25 @@ completion counter without submitting DMA. Once `can_run_list` is final, the
 scheduler flushes those members together, before forward-batch setup:
 
 ```mermaid
-flowchart TD
-    A[Allocate slots and vote across ranks] --> B[Prepare each request without DMA]
-    B --> C[Finalize admitted requests]
-    C --> D[Flush one layerwise batch]
-    D --> E[Forward waits for each layer completion]
+flowchart LR
+    subgraph Before[Before: launch per request]
+        direction TB
+        A[Request A] --> LA[Launch A] --> CA[Layer counter A]
+        B[Request B] --> LB[Launch B] --> CB[Layer counter B]
+    end
+    subgraph After[After: launch the admitted set]
+        direction TB
+        PA[Prepare A without DMA] --> M[One merged launch]
+        PB[Prepare B without DMA] --> M
+        M --> C[One batch completion<br/>per layer]
+    end
+    Before ~~~ After
 ```
+
+The two requests illustrate launch coalescing, not measured timing. Lookup,
+mappings and preflight remain per request. The final launch and completion
+accounting are merged; forward still waits for each layer to become ready.
+Each rank retains its own layer wait/notification for the merged task.
 
 Enable it with:
 
@@ -99,7 +112,8 @@ Prepared requests can be cancelled before launch. After an unacknowledged
 launch, mappings remain owned and reset/reclamation is rejected until safety
 can be established. CE H2D/D2H selection is independent of admission batching;
 its switches and native rebuild requirement are documented in FlexKV's
-[cache restore guide](https://github.com/taco-project/FlexKV/blob/ca85ad4da7d2e0d3099fabbc95a5b98953a100d5/docs/cache_tier_performance_controls.md).
+[illustrated cache restore guide](https://github.com/taco-project/FlexKV/blob/cd6ce5ebbd52da72e62992592637a8833c9d953b/docs/cache_tier_performance_controls.md)
+and [中文图解](https://github.com/taco-project/FlexKV/blob/cd6ce5ebbd52da72e62992592637a8833c9d953b/docs/cache_restore_optimizations_zh.md).
 
 The focused CPU tests verify launch order, retry identity, capability fallback
 and allocation rollback with mocked transfers. Per-layer waits or cache hits
