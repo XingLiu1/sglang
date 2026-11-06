@@ -55,6 +55,70 @@ violation. Its count does not prove any destination is idle, so the adapter
 retains ownership and raises instead of freeing a potentially active DMA tail.
 This is not automatic request-level recovery.
 
+## Optional batching after admission
+
+This branch adds the SGLang half of
+[FlexKV #323](https://github.com/taco-project/FlexKV/pull/323), reviewed in
+[SGLang companion #17](https://github.com/XingLiu1/sglang/pull/17). Install both
+matching implementations. It applies to the ordinary IP adapter; MP and hybrid
+adapters retain their current launch path.
+
+Without batching, each admitted request starts its own layerwise transfer.
+With batching enabled, `init_load_back` prepares the request's mappings and
+completion counter without submitting DMA. Once `can_run_list` is final, the
+scheduler flushes those members together, before forward-batch setup:
+
+```mermaid
+flowchart LR
+    subgraph Before[Before: launch per request]
+        direction TB
+        A[Request A] --> LA[Launch A] --> CA[Layer counter A]
+        B[Request B] --> LB[Launch B] --> CB[Layer counter B]
+    end
+    subgraph After[After: launch the admitted set]
+        direction TB
+        PA[Prepare A without DMA] --> M[One merged launch]
+        PB[Prepare B without DMA] --> M
+        M --> C[One batch completion<br/>per layer]
+    end
+    Before ~~~ After
+```
+
+The two requests illustrate launch coalescing, not measured timing. Lookup,
+mappings and preflight remain per request. The final launch and completion
+accounting are merged; forward still waits for each layer to become ready.
+Each rank retains its own layer wait/notification for the merged task.
+
+Enable it with:
+
+```bash
+export FLEXKV_ENABLE_LAYERWISE_TRANSFER=1
+export FLEXKV_BATCH_LAYERWISE_RESTORE=1
+# Use the normal --enable-flexkv launch command above.
+```
+
+`FLEXKV_BATCH_LAYERWISE_RESTORE` defaults to `0`. A connector without
+`flush_layerwise_loads` keeps immediate launch even when the flag is set.
+`launch_pending_loads(can_run_list)` preserves the complete `(rid, attempt_id)`
+identity and flushes once after admission. The connector validates the same
+members on all ranks and coalesces them into one task with one signal per layer.
+
+The allocation-readiness vote is a correctness fix for connectors that provide
+`sync_load_ready`, including when batching is off. If any rank cannot allocate,
+successful peers free their new slots and release the held lookup; reusable GPU
+prefix slots stay owned by the cache. Older connectors retain the local check.
+
+Prepared requests can be cancelled before launch. After an unacknowledged
+launch, mappings remain owned and reset/reclamation is rejected until safety
+can be established. CE H2D/D2H selection is independent of admission batching;
+its switches and native rebuild requirement are documented in FlexKV's
+[illustrated cache restore guide](https://github.com/taco-project/FlexKV/blob/cd6ce5ebbd52da72e62992592637a8833c9d953b/docs/cache_tier_performance_controls.md)
+and [中文图解](https://github.com/taco-project/FlexKV/blob/cd6ce5ebbd52da72e62992592637a8833c9d953b/docs/cache_restore_optimizations_zh.md).
+
+The focused CPU tests verify launch order, retry identity, capability fallback
+and allocation rollback with mocked transfers. Per-layer waits or cache hits
+alone do not establish model-output correctness or end-to-end performance.
+
 ## Store ownership
 
 A store retains the source radix node until the connector reports completion.

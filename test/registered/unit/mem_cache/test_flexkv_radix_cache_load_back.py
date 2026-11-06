@@ -188,6 +188,7 @@ def _make_cache(page_size=4):
     cache.__dict__.update(base_cache.__dict__)
     cache._mode = FlexKVRadixCache.match_prefix.__globals__["FlexKVMode"].IP
     cache.flexkv_connector = MagicMock()
+    del cache.flexkv_connector.sync_load_ready
     cache.store_stream = MagicMock()
     cache._load_markers = {}
     cache._defer_duplicate_restores = False
@@ -207,6 +208,50 @@ def _make_cache(page_size=4):
     return cache, allocator
 
 
+@pytest.mark.parametrize(
+    "enabled,compatible", [(True, True), (False, True), (True, False)]
+)
+def test_ip_restore_defers_only_with_opt_in_and_capability(
+    monkeypatch, enabled, compatible
+):
+    cache, _ = _make_cache()
+    monkeypatch.setenv("FLEXKV_BATCH_LAYERWISE_RESTORE", "1" if enabled else "0")
+    if not compatible:
+        del cache.flexkv_connector.flush_layerwise_loads
+    cache.flexkv_connector.start_load_kv_layerwise.return_value = (4, 0)
+    handle = CacheRequestHandle("prepared", 3)
+    req = SimpleNamespace(
+        rid="prepared", cache_request_handle=handle, fill_ids=list(range(8))
+    )
+    key = _tracking_key("prepared", 3)
+    cache._load_markers[key] = SimpleNamespace(
+        key=RadixKey(array("q", range(4))), value_numel=0
+    )
+    slots = torch.arange(4)
+
+    def allocate_and_load(**kw):
+        kw["load_fn"](slots)
+        return slots, cache.root_node
+
+    cache._allocate_and_load = MagicMock(side_effect=allocate_and_load)
+    cache.init_load_back(
+        InitLoadBackParams(best_match_node=cache.root_node, host_hit_length=4, req=req)
+    )
+    call_args = cache.flexkv_connector.start_load_kv_layerwise.call_args
+    assert call_args.args[0] == key
+    assert call_args.kwargs == (
+        {"defer_launch": True} if enabled and compatible else {}
+    )
+    peer = SimpleNamespace(
+        rid="gpu-hit", cache_request_handle=CacheRequestHandle("gpu-hit", 2)
+    )
+    cache.launch_pending_loads([req, peer])
+    if compatible:
+        cache.flexkv_connector.flush_layerwise_loads.assert_called_once_with(
+            [key, _tracking_key("gpu-hit", 2)]
+        )
+
+
 def _load(cache, key, value_numel, uncached_len, rid):
     load_fn = MagicMock(side_effect=lambda slots: int(slots.numel()))
     result = cache._allocate_and_load(
@@ -220,6 +265,33 @@ def _load(cache, key, value_numel, uncached_len, rid):
     )
     assert result is not None
     return result, load_fn
+
+
+@pytest.mark.parametrize("local_ready", [False, True])
+def test_peer_allocation_failure_cancels_before_any_restore(local_ready):
+    cache, allocator = _make_cache()
+    if not local_ready:
+        allocator.alloc.side_effect = None
+        allocator.alloc.return_value = None
+    cache.flexkv_connector.sync_load_ready = MagicMock(return_value=False)
+    load_fn = MagicMock()
+    result = cache._allocate_and_load(
+        key=RadixKey(array("q", range(4))),
+        value_numel=0,
+        uncached_len=4,
+        last_node=cache.root_node,
+        tracking_rid=_tracking_key("vote"),
+        sglang_req_id="vote",
+        load_fn=load_fn,
+    )
+    assert result is None
+    cache.flexkv_connector.sync_load_ready.assert_called_once_with(local_ready)
+    cache.flexkv_connector.release_pending.assert_called_once_with(
+        _tracking_key("vote")
+    )
+    load_fn.assert_not_called()
+    assert allocator.free.call_count == int(local_ready)
+    assert cache._restore_leases == {}
 
 
 def test_duplicate_restore_reuses_live_node_without_creating_stale_leaf():

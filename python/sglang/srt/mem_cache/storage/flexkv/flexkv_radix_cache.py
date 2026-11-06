@@ -366,6 +366,12 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         if key is not None and self._restoring_host_prefixes.get(key) == rid:
             self._restoring_host_prefixes.pop(key)
 
+    def launch_pending_loads(self, reqs: list[Req]) -> None:
+        """Submit prepared restores after admission, before forward setup."""
+        flush = getattr(self.flexkv_connector, "flush_layerwise_loads", None)
+        if self._mode is FlexKVMode.IP and callable(flush):
+            flush([_request_key(req.cache_request_handle) for req in reqs])
+
     def init_load_back(  # type: ignore[override]
         self,
         params: InitLoadBackParams,
@@ -392,10 +398,17 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             )
 
         request_owned_req = req if self._mode is FlexKVMode.IP else None
+        batch_layerwise = (
+            self._mode is FlexKVMode.IP
+            and os.environ.get("FLEXKV_BATCH_LAYERWISE_RESTORE", "0") == "1"
+            and callable(getattr(self.flexkv_connector, "flush_layerwise_loads", None))
+        )
         load_fn = (
             (
                 lambda slot_mapping: self.flexkv_connector.start_load_kv_layerwise(
-                    _request_key(req.cache_request_handle), slot_mapping
+                    _request_key(req.cache_request_handle),
+                    slot_mapping,
+                    **({"defer_launch": True} if batch_layerwise else {}),
                 )[0]
             )
             if self._mode is FlexKVMode.IP
@@ -515,10 +528,15 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         if self.token_to_kv_pool_allocator.available_size() < uncached_len:
             self.evict(EvictParams(num_tokens=uncached_len))
         token_slots = self.token_to_kv_pool_allocator.alloc(uncached_len)
-        if token_slots is None:
-            # The reused prefix stays tree-owned. Return None so init_load_back
-            # releases the held task a refreshed lookup may have re-stashed.
-            return None
+        sync_ready = getattr(self.flexkv_connector, "sync_load_ready", None)
+        ready = token_slots is not None
+        if callable(sync_ready):
+            ready = sync_ready(ready)
+        if not ready:
+            if token_slots is not None:
+                self.token_to_kv_pool_allocator.free(token_slots)
+            self.flexkv_connector.release_pending(tracking_rid)
+            return (reused_indices, last_node) if reused_indices.numel() > 0 else None
 
         # The FlexKV ``launch`` interface takes the slot indices for the
         # tokens it will write — no leading ``-1`` padding (FlexKV has
