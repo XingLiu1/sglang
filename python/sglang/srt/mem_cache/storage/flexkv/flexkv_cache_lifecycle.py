@@ -57,6 +57,51 @@ class _RestoreLease:
 
 
 class FlexKVCacheLifecycleMixin:
+    def _configure_prefetch_window(self, server_args) -> None:
+        self.defer_host_lookup_until_admission = (
+            getattr(server_args, "flexkv_prefetch_window_size", 0) > 0
+        )
+        if self.defer_host_lookup_until_admission and not (
+            getattr(self.flexkv_connector, "_chunked_prefetch", False)
+            and getattr(self.flexkv_connector, "_prefetch_enabled", False)
+        ):
+            raise ValueError(
+                "--flexkv-prefetch-window-size requires enabled FlexKV chunked prefetch with timeout or best_effort"
+            )
+
+    def _acquire_window_restore_get(
+        self, token_ids, prefix_len, expected, rid, sglang_req_id, namespace_kwargs
+    ) -> bool:
+        if not getattr(self, "defer_host_lookup_until_admission", False):
+            return True
+        ids = list(token_ids[: prefix_len + expected])
+        mask = torch.zeros(len(ids), dtype=torch.bool)
+        mask[prefix_len:] = True
+        _, hit = self.flexkv_connector.lookup_kv(
+            ids,
+            mask,
+            rid=rid,
+            sglang_req_id=sglang_req_id,
+            cpu_only=True,
+            **namespace_kwargs,
+        )
+        if hit != expected:
+            # Admission priced the complete host hit. An expired/shorter lease
+            # must fall back before any DMA or private restore is registered.
+            self.flexkv_connector.release_pending(rid)
+            return False
+        return True
+
+    def _release_admitted_prefetch(self, reqs) -> None:
+        if getattr(self, "defer_host_lookup_until_admission", False):
+            for req in reqs:
+                self.terminate_prefetch(req.cache_request_handle)
+
+    def launch_pending_loads(self, reqs) -> None:
+        # Hybrid transfers launch per request; ordinary IP overrides this to
+        # flush its prepared batch before relinquishing speculative leases.
+        self._release_admitted_prefetch(reqs)
+
     def refresh_pending_prefix_metrics(self, waiting_queue) -> None:
         """Observe FCFS compute demand at the rank-symmetric scheduler hook."""
         if not waiting_queue:
@@ -306,6 +351,7 @@ class FlexKVCacheLifecycleMixin:
     def terminate_prefetch(self, handle: CacheRequestHandle) -> None:
         rid = _request_key(handle)
         self.flexkv_connector.cancel_prefetch(rid)
+        self._release_load_marker(handle)
 
     def pop_prefetch_loaded_span(
         self, handle: CacheRequestHandle

@@ -336,3 +336,7 @@ class Memory(msgspec.Struct):
             "variable."
         ),
     ] = None
+    flexkv_prefetch_window_size: A[
+        int,
+        "Limit FlexKV prefetch to the first K scheduled requests (0: eager queue-entry prefetch). Requires chunked prefetch with timeout or best_effort.",
+    ] = 0

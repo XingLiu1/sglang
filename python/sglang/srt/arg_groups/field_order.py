@@ -414,6 +414,7 @@ POSITIONAL_FIELD_ORDER = (
     "lmcache_config_file",
     "enable_flexkv",
     "flexkv_config_file",
+    "flexkv_prefetch_window_size",
     "kt_weight_path",
     "kt_method",
     "kt_cpuinfer",

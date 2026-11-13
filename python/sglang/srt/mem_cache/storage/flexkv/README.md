@@ -6,6 +6,49 @@ SGLang delegates host, SSD, and remote KV transfers to the external
 `FlexKVHybridRadixCache`, which wraps the current unified cache built from the storage tree slots and leaves
 radix insertion, SWA state, and eviction accounting with the inner cache.
 
+## Prefetch window for a long prefill queue
+
+`--flexkv-prefetch-window-size K` limits speculative L3-to-Host prefetch to the
+first K eligible requests in scheduler priority order. Default `0` preserves
+eager queue-entry prefetch. Select FlexKV with `--enable-flexkv` or
+`--radix-cache-backend flexkv`, keep radix caching enabled, and enable chunked
+prefetch in the existing FlexKV configuration:
+
+```json
+{
+  "enable_chunked_prefetch": true,
+  "prefetch_options": {"policy": "timeout", "timeout_budget_s": 0.1}
+}
+```
+
+The time above illustrates the syntax, not a measured recommendation.
+`best_effort` is also supported; `wait_complete` disables the chunked runtime
+and is rejected with a positive window size. Existing session, reserved-byte,
+pinned-byte and result-TTL budgets remain in effect within the Host pool.
+Completed but unconsumed result leases keep their credit and protection.
+
+Queue entry, including P/D bootstrap, does not start I/O in windowed mode.
+Admission opens the window after sorting and refills it after admitted restores
+are flushed, before compute-batch creation. Queued requests losing their window
+position release only their own attempt's speculative resources; claimed I/O
+still drains before buffers can be reused. Uncommitted restores retain ownership.
+
+Priority matches use GPU prefixes only, without acquiring Host references for
+the entire queue. A candidate's Host probe retains its prefetch result lease.
+Ordinary and hybrid adapters acquire the held GET only after allocation succeeds
+on all participating ranks. A shorter/expired result falls back before DMA;
+admission retains the current all-or-nothing restore contract. Unused leases for
+admitted GPU hits are released after restore flush. Default-off behavior keeps
+the existing restore path.
+
+K bounds fresh admission batch size as well as lookahead; a small window can
+reduce batching. Cache-aware ordering and pre-admission prefix snapshots omit
+Host hits in this mode. Size K and the byte budgets for the model/layout and
+leave capacity for foreground work. Validate useful/unused prefetch bytes,
+repeat L3 reads, TTFT and prefill throughput on the target workload. The new
+control-plane CPU/mock tests do not establish GPU, RDMA, output correctness or
+performance gains.
+
 ## Setup
 
 Install compatible SGLang and FlexKV source revisions, including their required

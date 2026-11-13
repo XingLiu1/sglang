@@ -2,6 +2,7 @@
 
 import ast
 import json
+from copy import copy
 from enum import Enum, auto
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from sglang.srt.managers.flexkv_prefetch_window import FlexKVPrefetchWindow
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
 )
@@ -167,6 +169,26 @@ def test_idle_flexkv_retries_admission_after_no_token():
     run()
     run()
     assert adder.add_one_req.call_count == 2
+
+
+def test_window_does_not_bypass_pending_heads_with_uncached_queue_tails():
+    req, leased, adder, run = _scheduler_case(flexkv=True)
+    scheduler = run.scheduler
+    requests = [copy(req) for _ in range(1000)]
+    for i, candidate in enumerate(requests):
+        candidate.rid = str(i)
+        candidate.cache_request_handle = CacheRequestHandle(str(i), 0)
+    scheduler.waiting_queue[:] = requests
+    scheduler.flexkv_prefetch_window = FlexKVPrefetchWindow(2)
+    scheduler.tree_cache.prefetch_request = MagicMock()
+    scheduler.tree_cache.terminate_prefetch = MagicMock()
+    scheduler.tree_cache.check_prefetch_progress.return_value = False
+    leased.clear()
+    for _ in range(3):
+        assert run()[0] is None
+    assert scheduler.tree_cache.prefetch_request.call_count == 2
+    assert scheduler.tree_cache.check_prefetch_progress.call_count == 6
+    adder.add_one_req.assert_not_called()
 
 
 @pytest.mark.parametrize("chunked", [False, True])

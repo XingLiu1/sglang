@@ -145,6 +145,7 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             attn_cp_group=attn_cp_group,
         )
 
+        self._configure_prefetch_window(server_args)
         self._mode = (
             FlexKVMode.IP if self.flexkv_connector.enable_layerwise else FlexKVMode.MP
         )
@@ -296,7 +297,11 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         fkv_task_id, hit = self.flexkv_connector.lookup_kv(
             token_ids=token_ids,
             token_mask=token_mask,
-            rid=_request_key(req.cache_request_handle),
+            rid=(
+                None
+                if getattr(self, "defer_host_lookup_until_admission", False)
+                else _request_key(req.cache_request_handle)
+            ),
             sglang_req_id=req.rid,
             **namespace_kwargs,
         )
@@ -371,6 +376,8 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
         flush = getattr(self.flexkv_connector, "flush_layerwise_loads", None)
         if self._mode is FlexKVMode.IP and callable(flush):
             flush([_request_key(req.cache_request_handle) for req in reqs])
+        if getattr(self, "defer_host_lookup_until_admission", False):
+            self._release_admitted_prefetch(reqs)
 
     def init_load_back(  # type: ignore[override]
         self,
@@ -507,7 +514,11 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             _, uncached_len = self.flexkv_connector.lookup_kv(
                 token_ids=token_ids,
                 token_mask=token_mask,
-                rid=tracking_rid,
+                rid=(
+                    None
+                    if getattr(self, "defer_host_lookup_until_admission", False)
+                    else tracking_rid
+                ),
                 sglang_req_id=sglang_req_id,
                 **_namespace_kwargs(
                     self.flexkv_connector, key.extra_key, key.cache_salt
@@ -540,6 +551,26 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             self.flexkv_connector.release_pending(tracking_rid)
             # Any reused prefix remains tree-owned for the next rematch.
             return None
+
+        if getattr(self, "defer_host_lookup_until_admission", False):
+            try:
+                held = self._acquire_window_restore_get(
+                    target_key.raw_token_ids(),
+                    value_numel,
+                    uncached_len,
+                    tracking_rid,
+                    sglang_req_id,
+                    _namespace_kwargs(
+                        self.flexkv_connector, key.extra_key, key.cache_salt
+                    ),
+                )
+            except Exception:
+                self.token_to_kv_pool_allocator.free(token_slots)
+                self.flexkv_connector.release_pending(tracking_rid)
+                raise
+            if not held:
+                self.token_to_kv_pool_allocator.free(token_slots)
+                return None
 
         # The FlexKV ``launch`` interface takes the slot indices for the
         # tokens it will write — no leading ``-1`` padding (FlexKV has
