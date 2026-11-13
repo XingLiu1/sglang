@@ -122,6 +122,7 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
             attn_tp_group=attn_tp_group if attn_tp_group is not None else tp_group,
             attn_cp_group=attn_cp_group,
         )
+        self._configure_prefetch_window(server_args)
         if self.flexkv_connector.enable_layerwise:
             self.flexkv_connector.register_layer_transfer_counter(kvcache)
 
@@ -190,7 +191,11 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
         _, hit_length = self.flexkv_connector.lookup_kv(
             token_ids,
             token_mask,
-            rid=_request_key(params.req.cache_request_handle),
+            rid=(
+                None
+                if getattr(self, "defer_host_lookup_until_admission", False)
+                else _request_key(params.req.cache_request_handle)
+            ),
             sglang_req_id=params.req.rid,
             **namespace_kwargs,
         )
@@ -235,6 +240,28 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
                 _request_key(req.cache_request_handle)
             )
             return 0, req.last_node
+
+        if getattr(self, "defer_host_lookup_until_admission", False):
+            try:
+                held = self._acquire_window_restore_get(
+                    req.full_untruncated_fill_ids,
+                    marker.device_length,
+                    params.host_hit_length,
+                    _request_key(req.cache_request_handle),
+                    req.rid,
+                    _namespace_kwargs(
+                        self.flexkv_connector, req.extra_key, req.cache_salt
+                    ),
+                )
+            except Exception:
+                self.token_to_kv_pool_allocator.free(device_indices)
+                self.flexkv_connector.release_pending(
+                    _request_key(req.cache_request_handle)
+                )
+                raise
+            if not held:
+                self.token_to_kv_pool_allocator.free(device_indices)
+                return 0, req.last_node
 
         # Register ownership before launching the connector. If launch raises,
         # its write status may be unknown; reset must drain the connector before

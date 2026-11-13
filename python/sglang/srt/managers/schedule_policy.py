@@ -225,7 +225,7 @@ class SchedulePolicy:
             for r in waiting_queue:
                 if self.tree_cache.has_uncommitted_restore(r):
                     continue
-                match_kv_cache(r, self.tree_cache)
+                match_kv_cache(r, self.tree_cache, for_scheduling=True)
 
         if self.policy == CacheAgnosticPolicy.FCFS:
             if self.enable_priority_scheduling:
@@ -364,7 +364,9 @@ class SchedulePolicy:
             prefix_ids = r.origin_input_ids + r.output_ids
             extra_key = r.extra_key
             cache_salt = r.cache_salt
-            match_result = match_kv_cache(r, self.tree_cache, prefix_ids)
+            match_result = match_kv_cache(
+                r, self.tree_cache, prefix_ids, for_scheduling=True
+            )
 
             # NOTE(sang): This logic is for in-batch prefix caching;
             # If there are more than 1 request that have small matching prefix from

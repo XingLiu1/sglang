@@ -287,10 +287,27 @@ def check_pipeline_parallel_compat(cfg: Any) -> None:
     )
 
 
+def check_flexkv_prefetch_window(server_args: Any) -> None:
+    cfg = resolving_view(server_args)
+    if cfg.flexkv_prefetch_window_size < 0:
+        raise ValueError("--flexkv-prefetch-window-size must be non-negative")
+    enabled = cfg.enable_flexkv or cfg.radix_cache_backend == "flexkv"
+    if cfg.flexkv_prefetch_window_size > 0 and (
+        not enabled
+        or cfg.radix_cache_backend not in (None, "flexkv")
+        or cfg.disable_radix_cache
+    ):
+        raise ValueError(
+            "--flexkv-prefetch-window-size requires an enabled FlexKV radix cache"
+        )
+
+
 def check_server_args(server_args: Any):
     from sglang.srt.arg_groups.lora_hook import check_lora_server_args
 
     cfg = resolving_view(server_args)
+
+    check_flexkv_prefetch_window(server_args)
 
     # Check parallel size constraints
     if cfg.ep_join_mode != "scale":
