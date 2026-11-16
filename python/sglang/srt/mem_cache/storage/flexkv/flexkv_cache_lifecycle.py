@@ -57,17 +57,19 @@ class _RestoreLease:
 
 
 class FlexKVCacheLifecycleMixin:
-    def _configure_prefetch_window(self, server_args) -> None:
-        self.defer_host_lookup_until_admission = (
-            getattr(server_args, "flexkv_prefetch_window_size", 0) > 0
+    def _configure_prefetch_window(self) -> None:
+        from sglang.srt.managers.flexkv_prefetch_window import FlexKVPrefetchWindow
+
+        connector = self.flexkv_connector
+        self.defer_host_lookup_until_admission = bool(
+            getattr(connector, "_chunked_prefetch", False)
+            and getattr(connector, "_prefetch_enabled", False)
         )
-        if self.defer_host_lookup_until_admission and not (
-            getattr(self.flexkv_connector, "_chunked_prefetch", False)
-            and getattr(self.flexkv_connector, "_prefetch_enabled", False)
-        ):
-            raise ValueError(
-                "--flexkv-prefetch-window-size requires enabled FlexKV chunked prefetch with timeout or best_effort"
-            )
+        self.prefetch_window = (
+            FlexKVPrefetchWindow.from_connector(connector)
+            if self.defer_host_lookup_until_admission
+            else None
+        )
 
     def _acquire_window_restore_get(
         self, token_ids, prefix_len, expected, rid, sglang_req_id, namespace_kwargs
@@ -289,19 +291,21 @@ class FlexKVCacheLifecycleMixin:
             # do not report a successful reset or discard the remaining ledger.
             raise RuntimeError(f"FlexKV failed to free restore allocations: {failed}")
 
-    def prefetch_request(self, req: Req) -> None:
-        """Start queued prefetch without a foreground lookup or H2D allocation."""
-        # Foreground lookup runs after stop-and-drain, otherwise it could fetch
-        # the whole remote prefix before the prefetch policy gets a chance to stop.
+    def prefetch_token_count(self, req: Req) -> int:
         req.init_next_round_input(tree_cache=None, cow_mamba=False)
         fill_ids = req.full_untruncated_fill_ids
-        if not fill_ids:
-            return
-        match_end = req._compute_max_prefix_len(len(fill_ids))
-        self.prefetch_from_storage(
+        end = req._compute_max_prefix_len(len(fill_ids)) if fill_ids else 0
+        return end // self.page_size * self.page_size
+
+    def prefetch_request(self, req: Req, *, max_tokens: int | None = None) -> bool:
+        """Start only the byte-reserved prefix, preserving its complete hash chain."""
+        end = self.prefetch_token_count(req)
+        if max_tokens is not None:
+            end = min(end, max_tokens)
+        return self.prefetch_from_storage(
             req.cache_request_handle,
             None,
-            fill_ids[:match_end],
+            req.full_untruncated_fill_ids[:end],
             extra_key=req.extra_key,
             cache_salt=req.cache_salt,
         )
@@ -317,7 +321,7 @@ class FlexKVCacheLifecycleMixin:
         matched_prefix_tokens=None,
         extra_key=None,
         cache_salt=None,
-    ) -> None:
+    ) -> bool:
         """Pass the complete token hash chain and the candidate's absolute offset."""
         rid = _request_key(handle)
         del last_host_node, last_hash, prefix_keys
@@ -325,23 +329,29 @@ class FlexKVCacheLifecycleMixin:
             self.flexkv_connector, extra_key, cache_salt
         )
         if namespace_kwargs is None or not token_ids:
-            return
+            return False
         prefix = [] if matched_prefix_tokens is None else list(matched_prefix_tokens)
         ids = prefix + list(token_ids)
         ids = ids[: len(ids) // self.page_size * self.page_size]
         if len(ids) <= len(prefix):
-            return
+            return False
         if getattr(self.flexkv_connector, "_chunked_prefetch", False):
-            self.flexkv_connector.prefetch_async(
-                rid,
-                ids,
-                sglang_req_id=handle.rid,
-                candidate_start_token=len(prefix),
-                **namespace_kwargs,
+            return (
+                self.flexkv_connector.prefetch_async(
+                    rid,
+                    ids,
+                    sglang_req_id=handle.rid,
+                    candidate_start_token=len(prefix),
+                    **namespace_kwargs,
+                )
+                >= 0
             )
         else:
-            self.flexkv_connector.prefetch_async(
-                rid, ids, sglang_req_id=handle.rid, **namespace_kwargs
+            return (
+                self.flexkv_connector.prefetch_async(
+                    rid, ids, sglang_req_id=handle.rid, **namespace_kwargs
+                )
+                >= 0
             )
 
     def check_prefetch_progress(self, handle: CacheRequestHandle) -> bool:

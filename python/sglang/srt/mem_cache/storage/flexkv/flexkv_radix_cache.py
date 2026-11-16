@@ -145,7 +145,7 @@ class FlexKVRadixCache(FlexKVCacheLifecycleMixin, RadixCache):
             attn_cp_group=attn_cp_group,
         )
 
-        self._configure_prefetch_window(server_args)
+        self._configure_prefetch_window()
         self._mode = (
             FlexKVMode.IP if self.flexkv_connector.enable_layerwise else FlexKVMode.MP
         )

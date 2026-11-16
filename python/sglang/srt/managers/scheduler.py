@@ -144,7 +144,6 @@ from sglang.srt.lora.lora_drainer import LoRADrainer
 from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
 from sglang.srt.managers.deferred_output import ResponseCompletion
 from sglang.srt.managers.disagg_service import maybe_create_ascend_config_store
-from sglang.srt.managers.flexkv_prefetch_window import FlexKVPrefetchWindow
 from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -1401,12 +1400,7 @@ class Scheduler(
         # Set by the ShutdownReq handler to break the event loop for graceful shutdown.
         self.gracefully_exit = False
         self.waiting_queue = IndexedReqList(ListKind.WAITING, abort=self._abort_waiting)
-        window_size = get_memory().flexkv_prefetch_window_size
-        self.flexkv_prefetch_window = (
-            FlexKVPrefetchWindow(window_size)
-            if self.enable_flexkv and window_size > 0
-            else None
-        )
+        self.flexkv_prefetch_window = getattr(self.tree_cache, "prefetch_window", None)
         # Read on every prefill pass, so cache it.
         self.log_schedule_decisions = get_observability().log_schedule_decisions
         # The running decoding batch for continuous batching
@@ -4674,8 +4668,6 @@ class Scheduler(
         # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
             if self.tree_cache.has_uncommitted_restore(req):
-                continue
-            if prefetch_window is not None and not prefetch_window.contains(req):
                 continue
             # A spent pass budget admits no one, even before the first
             # candidate: the resumed chunk or mixed decode rows can spend it.

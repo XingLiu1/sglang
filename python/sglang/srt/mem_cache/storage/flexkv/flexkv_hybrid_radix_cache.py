@@ -122,7 +122,7 @@ class FlexKVHybridRadixCache(FlexKVCacheLifecycleMixin, BasePrefixCache):
             attn_tp_group=attn_tp_group if attn_tp_group is not None else tp_group,
             attn_cp_group=attn_cp_group,
         )
-        self._configure_prefetch_window(server_args)
+        self._configure_prefetch_window()
         if self.flexkv_connector.enable_layerwise:
             self.flexkv_connector.register_layer_transfer_counter(kvcache)
 

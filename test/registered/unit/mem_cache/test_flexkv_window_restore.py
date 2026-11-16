@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 import pytest
 import torch
@@ -65,17 +65,18 @@ def handle():
 @pytest.mark.parametrize(
     "chunked,enabled", [(False, False), (False, True), (True, False), (True, True)]
 )
-def test_window_requires_an_active_chunked_runtime(chunked, enabled):
+def test_byte_window_automatically_uses_only_an_active_chunked_runtime(
+    chunked, enabled
+):
+    from sglang.srt.managers.flexkv_prefetch_window import FlexKVPrefetchWindow
+
     cache = Lifecycle()
-    cache.flexkv_connector = NS(_chunked_prefetch=chunked, _prefetch_enabled=enabled)
-    if chunked and enabled:
-        cache._configure_prefetch_window(NS(flexkv_prefetch_window_size=4))
-        assert cache.defer_host_lookup_until_admission
-    else:
-        with pytest.raises(ValueError, match="chunked"):
-            cache._configure_prefetch_window(NS(flexkv_prefetch_window_size=4))
-    cache._configure_prefetch_window(NS(flexkv_prefetch_window_size=0))
-    assert not cache.defer_host_lookup_until_admission
+    connector = NS(_chunked_prefetch=chunked, _prefetch_enabled=enabled)
+    cache.flexkv_connector = connector
+    with patch.object(FlexKVPrefetchWindow, "from_connector", return_value="budget"):
+        cache._configure_prefetch_window()
+    assert cache.defer_host_lookup_until_admission is (chunked and enabled)
+    assert cache.prefetch_window == ("budget" if chunked and enabled else None)
 
 
 @pytest.mark.parametrize("hit", [4, 2, 0])
@@ -284,42 +285,6 @@ def test_admission_host_probe_preserves_result_lease(kind, window):
     )
 
 
-@pytest.mark.parametrize(
-    "size,enabled,backend,disabled,valid",
-    [
-        (-1, True, None, False, False),
-        (4, False, None, False, False),
-        (4, True, "lmcache", False, False),
-        (4, True, None, True, False),
-        (4, True, None, False, True),
-        (4, False, "flexkv", False, True),
-        (0, False, None, False, True),
-    ],
-)
-def test_window_argument_validation(size, enabled, backend, disabled, valid):
-    path = ROOT / "arg_groups/validation_hook.py"
-    function = next(
-        n
-        for n in ast.parse(path.read_text()).body
-        if isinstance(n, ast.FunctionDef) and n.name == "check_flexkv_prefetch_window"
-    )
-    scope = {"resolving_view": lambda value: value, "Any": object}
-    exec(
-        compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), scope
-    )
-    config = NS(
-        flexkv_prefetch_window_size=size,
-        enable_flexkv=enabled,
-        radix_cache_backend=backend,
-        disable_radix_cache=disabled,
-    )
-    if valid:
-        scope["check_flexkv_prefetch_window"](config)
-    else:
-        with pytest.raises(ValueError):
-            scope["check_flexkv_prefetch_window"](config)
-
-
 @pytest.mark.parametrize("window", [False, True])
 @pytest.mark.parametrize("scheduling", [False, True])
 def test_priority_probes_do_not_acquire_tail_host_references(window, scheduling):
@@ -368,3 +333,32 @@ def test_priority_probes_do_not_acquire_tail_host_references(window, scheduling)
     assert cache.match_prefix.call_args.args[0].req is (
         None if window and scheduling else req
     )
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_byte_limited_prefetch_passes_only_the_reserved_hash_chain(accepted):
+    cache = Lifecycle()
+    cache.page_size = 4
+    cache.flexkv_connector = NS(
+        _chunked_prefetch=True,
+        prefetch_async=Mock(return_value=17 if accepted else -1),
+    )
+    req = NS(
+        full_untruncated_fill_ids=list(range(40)),
+        init_next_round_input=Mock(),
+        _compute_max_prefix_len=lambda n: n - 1,
+        cache_request_handle=handle(),
+        extra_key=None,
+        cache_salt=None,
+    )
+    assert cache.prefetch_token_count(req) == 36
+    assert cache.prefetch_request(req, max_tokens=12) is accepted
+    args, kwargs = cache.flexkv_connector.prefetch_async.call_args
+    assert args == ('["same",3]', list(range(12)))
+    assert kwargs == dict(sglang_req_id="same", candidate_start_token=0)
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__]))

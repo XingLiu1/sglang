@@ -6,48 +6,53 @@ SGLang delegates host, SSD, and remote KV transfers to the external
 `FlexKVHybridRadixCache`, which wraps the current unified cache built from the storage tree slots and leaves
 radix insertion, SWA state, and eviction accounting with the inner cache.
 
-## Prefetch window for a long prefill queue
+## Byte budget for a long prefill queue
 
-`--flexkv-prefetch-window-size K` limits speculative L3-to-Host prefetch to the
-first K eligible requests in scheduler priority order. Default `0` preserves
-eager queue-entry prefetch. Select FlexKV with `--enable-flexkv` or
-`--radix-cache-backend flexkv`, keep radix caching enabled, and enable chunked
-prefetch in the existing FlexKV configuration:
+When FlexKV chunked prefetch is active with `timeout` or `best_effort`, the
+scheduler automatically limits speculative prefetch to **128 GiB** in priority
+order. There is no request-count window or additional CLI setting. Queue entry,
+including P/D bootstrap, defers I/O until the scheduling pass has sorted the
+queue. `wait_complete` and legacy prefetch keep their existing path.
 
-```json
-{
-  "enable_chunked_prefetch": true,
-  "prefetch_options": {"policy": "timeout", "timeout_budget_s": 0.1}
-}
-```
+The effective admission budget is the smaller of 128 GiB, FlexKV's existing
+`prefetch_max_pinned_bytes`, and the Full-KV Host pool capacity minus one block.
+For example, a backend configured with a 2 GiB pinned limit still admits at most
+2 GiB; this change does not silently increase that backend limit or allocate
+another Host pool. Existing session, in-flight-byte, result-TTL and physical
+allocator limits remain authoritative, shared across backend clients. A rejected
+session start is retried on the next scheduling pass.
 
-The time above illustrates the syntax, not a measured recommendation.
-`best_effort` is also supported; `wait_complete` disables the chunked runtime
-and is rejected with a positive window size. Existing session, reserved-byte,
-pinned-byte and result-TTL budgets remain in effect within the Host pool.
-Completed but unconsumed result leases keep their credit and protection.
+At cache initialization, reuse FlexKV's `block_size_in_bytes_for_cache` with
+its resolved pool geometry. The admission estimate is aligned-block count times
+block bytes, plus the registered SWA/state snapshot and `all_write` replicas
+when applicable. It does not round a compressed layout to integer bytes per
+token, or grant an independent quota to each TP rank: cooperating ranks make the
+same admission decisions using pool-wide bytes and launch through the existing
+sync leader. A request larger than the available budget prefetches only a
+block-aligned prefix. The entire prefix hash chain is retained.
 
-Queue entry, including P/D bootstrap, does not start I/O in windowed mode.
-Admission opens the window after sorting and refills it after admitted restores
-are flushed, before compute-batch creation. Queued requests losing their window
-position release only their own attempt's speculative resources; claimed I/O
-still drains before buffers can be reused. Uncommitted restores retain ownership.
+The scheduler conservatively charges shared/local prefixes once per request;
+this is a lookahead estimate, not unique physical-block accounting. Completed
+but unconsumed results keep their credit. A live H2D restore keeps the scheduler
+credit after leaving the waiting queue, until its restore checkpoint. Reordered
+queued requests relinquish only their own speculative lease; FlexKV continues
+to account for canceled I/O until it drains. Its pins and foreground GET ownership
+protect source buffers throughout the lease handoff, even when scheduler credit
+is later reused. The backend ledger also covers tree-node suffixes pinned beyond
+the requested boundary. Leaving a block free is not a guarantee that an arbitrary
+foreground batch fits; normal allocator backpressure still applies.
 
-Priority matches use GPU prefixes only, without acquiring Host references for
-the entire queue. A candidate's Host probe retains its prefetch result lease.
-Ordinary and hybrid adapters acquire the held GET only after allocation succeeds
-on all participating ranks. A shorter/expired result falls back before DMA;
-admission retains the current all-or-nothing restore contract. Unused leases for
-admitted GPU hits are released after restore flush. Default-off behavior keeps
-the existing restore path.
+Priority probes use GPU prefixes without held Host lookups for the entire queue.
+Admission acquires the held GET only after allocation agreement, while preserving
+the existing prefetch result lease during probes. Both ordinary and hybrid adapters revalidate the complete admitted Host span; a shorter or expired result falls back before DMA, preserving the all-or-nothing restore contract.
+Unused admitted result leases are released after restore flush.
 
-K bounds fresh admission batch size as well as lookahead; a small window can
-reduce batching. Cache-aware ordering and pre-admission prefix snapshots omit
-Host hits in this mode. Size K and the byte budgets for the model/layout and
-leave capacity for foreground work. Validate useful/unused prefetch bytes,
-repeat L3 reads, TTFT and prefill throughput on the target workload. The new
-control-plane CPU/mock tests do not establish GPU, RDMA, output correctness or
-performance gains.
+The byte budget limits speculative lookahead, not compute batch size. Candidates
+outside it remain eligible for normal scheduling; prefetch completion, memory,
+LoRA and token budgets continue to determine admission. Cache-aware ordering and
+pre-admission prefix snapshots omit Host hits in this mode. CPU/controlled-endpoint
+tests cover these contracts; GPU/RDMA, output accuracy, TTFT and throughput A/B
+validation remain separate.
 
 ## Setup
 
