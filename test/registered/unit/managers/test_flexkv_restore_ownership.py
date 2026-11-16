@@ -2,6 +2,7 @@
 
 import ast
 import json
+from copy import copy
 from enum import Enum, auto
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from sglang.srt.managers.flexkv_prefetch_window import FlexKVPrefetchWindow
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
 )
@@ -167,6 +169,29 @@ def test_idle_flexkv_retries_admission_after_no_token():
     run()
     run()
     assert adder.add_one_req.call_count == 2
+
+
+def test_byte_budget_does_not_impose_a_compute_admission_count():
+    req, leased, adder, run = _scheduler_case(flexkv=True)
+    scheduler = run.scheduler
+    candidates = [copy(req) for _ in range(3)]
+    for i, candidate in enumerate(candidates):
+        candidate.rid = str(i)
+        candidate.cache_request_handle = CacheRequestHandle(str(i), 0)
+    scheduler.waiting_queue[:] = candidates
+    scheduler.flexkv_prefetch_window = FlexKVPrefetchWindow(4, 10, capacity_bytes=20)
+    cache = scheduler.tree_cache
+    cache.prefetch_token_count = lambda req: 4
+    cache.prefetch_request = MagicMock(return_value=True)
+    cache.terminate_prefetch = MagicMock()
+    # The first two reserved prefetches are busy. Normal scheduling remains
+    # responsible for deciding whether the third candidate can make progress.
+    cache.check_prefetch_progress.side_effect = [False, False, True]
+    leased.clear()
+    run()
+    assert scheduler.flexkv_prefetch_window.reserved_bytes == 20
+    assert cache.prefetch_request.call_count == 2
+    assert adder.add_one_req.call_args.args[0] is candidates[2]
 
 
 @pytest.mark.parametrize("chunked", [False, True])
@@ -336,3 +361,9 @@ def test_admitted_restore_flush_runs_once_before_forward_setup():
     assert result is batch
     cache.launch_pending_loads.assert_called_once_with([first, second])
     assert events == ["admit", "admit", "flush", "forward_init", "prepare"]
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__]))

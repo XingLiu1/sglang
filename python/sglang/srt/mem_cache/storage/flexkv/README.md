@@ -6,6 +6,74 @@ SGLang delegates host, SSD, and remote KV transfers to the external
 `FlexKVHybridRadixCache`, which wraps the current unified cache built from the storage tree slots and leaves
 radix insertion, SWA state, and eviction accounting with the inner cache.
 
+## Byte budget for a long prefill queue
+
+When FlexKV chunked prefetch is active with `timeout` or `best_effort`, the
+scheduler limits speculative prefetch by a **128 GiB default byte ceiling** in
+priority order. There is no request-count window or additional SGLang CLI setting. Queue entry,
+including P/D bootstrap, defers I/O until the scheduling pass has sorted the
+queue. `wait_complete` and legacy prefetch keep their existing path.
+
+`prefetch_max_pinned_bytes` remains the one adjustable byte ceiling, defaulting
+to 137438953472 bytes (128 GiB). The existing environment equivalent is
+`FLEXKV_PREFETCH_MAX_PINNED_BYTES`. An explicit value overrides the default;
+remove or update an old explicit 2 GiB value to use the new default.
+The effective budget is the smaller of this ceiling and **half the actual
+Full-KV L2 pool capacity minus one block**, rounded down to whole blocks:
+
+```text
+min(prefetch_max_pinned_bytes,
+    max(0, floor(actual Full-KV L2 block count / 2) - 1) * physical block bytes)
+```
+
+Both backend planner and adapter use FlexKV's `resolve_prefetch_budget`,
+including compressed block layouts, registered SWA/state and all_write replicas.
+The budget is accounting within the existing pool, without another allocation.
+SGLang's default strategy is `timeout`; a minimal explicit configuration is:
+
+```yaml
+enable_chunked_prefetch: true
+prefetch_options:
+  policy: timeout
+# Optional: the default is already 128 GiB.
+prefetch_max_pinned_bytes: 137438953472
+```
+
+Cooperating TP ranks use the same pool-wide estimate and existing sync-leader
+launch. The backend pool has one authoritative pin/reservation ledger across
+its clients. A request larger than available credit prefetches only an aligned
+prefix, preserving the full prefix hash chain. Existing session, in-flight-byte,
+result-TTL and physical allocator limits remain in effect. The in-flight staging
+limit controls one transfer window, not cumulative completed KV residency;
+completed blocks transfer to pinned credit and subsequent windows can refill.
+A rejected session start is retried on the next scheduling pass.
+
+The scheduler conservatively charges shared/local prefixes once per request;
+this is a lookahead estimate, not unique physical-block accounting. Completed
+but unconsumed results keep their credit. A live H2D restore keeps the scheduler
+credit after leaving the waiting queue, until its restore checkpoint. Reordered
+queued requests relinquish only their own speculative lease; FlexKV continues
+to account for canceled I/O until it drains. Its pins and foreground GET ownership
+protect source buffers throughout the lease handoff, even when scheduler credit
+is later reused. The backend ledger also covers tree-node suffixes pinned beyond
+the requested boundary. Reserving half the pool plus one block does not guarantee that an arbitrary
+foreground batch fits; normal allocator backpressure still applies.
+
+Priority probes use GPU prefixes without held Host lookups for the entire queue.
+Admission acquires the held GET only after allocation agreement, while preserving
+the existing prefetch result lease during probes. Both ordinary and hybrid adapters revalidate the complete admitted Host span; a shorter or expired result falls back before DMA, preserving the all-or-nothing restore contract.
+Unused admitted result leases are released after restore flush.
+
+The byte budget limits speculative lookahead, not compute batch size. Candidates
+outside it remain eligible for normal scheduling; prefetch completion, memory,
+LoRA and token budgets continue to determine admission. Cache-aware ordering and
+pre-admission prefix snapshots omit Host hits in this mode. CPU/controlled-endpoint
+tests cover these contracts; GPU/RDMA, output accuracy, TTFT and throughput A/B
+validation remain separate.
+
+The automatic byte budget requires the paired [FlexKV backend update](https://github.com/taco-project/FlexKV/pull/338).
+Deploy both source revisions together and restart any external FlexKV server.
+
 ## Setup
 
 Install compatible SGLang and FlexKV source revisions, including their required

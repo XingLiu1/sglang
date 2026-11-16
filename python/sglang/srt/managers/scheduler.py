@@ -1400,6 +1400,7 @@ class Scheduler(
         # Set by the ShutdownReq handler to break the event loop for graceful shutdown.
         self.gracefully_exit = False
         self.waiting_queue = IndexedReqList(ListKind.WAITING, abort=self._abort_waiting)
+        self.flexkv_prefetch_window = getattr(self.tree_cache, "prefetch_window", None)
         # Read on every prefill pass, so cache it.
         self.log_schedule_decisions = get_observability().log_schedule_decisions
         # The running decoding batch for continuous batching
@@ -3694,6 +3695,8 @@ class Scheduler(
             self.handle_generate_request(tokenized_req)
 
     def _prefetch_kvcache(self, req: Req, storage_hit_end: Optional[int] = None):
+        if getattr(self, "flexkv_prefetch_window", None) is not None:
+            return
         if self.enable_unified_cache_external_linker:
             return self.tree_cache.linker.prefetch(req)
         if self.enable_hicache_storage or self.enable_lmcache:
@@ -4497,6 +4500,10 @@ class Scheduler(
             for req in ready_grammar_requests:
                 self._add_request_to_queue(req)
 
+        prefetch_window = getattr(self, "flexkv_prefetch_window", None)
+        if prefetch_window is not None and not self.waiting_queue:
+            prefetch_window.update([], self.tree_cache)
+
         if self.enable_priority_preemption or self.is_hybrid_swa:
             # Reset batch_is_full to try preemption with a prefill adder.
             running_batch.batch_is_full = False
@@ -4643,6 +4650,14 @@ class Scheduler(
                         else None
                     ),
                 )
+
+        prefetch_eligible = lambda req: (
+            not self.enable_lora or self.can_schedule_lora_req(req, running_loras)
+        )
+        if prefetch_window is not None:
+            prefetch_window.update(
+                self.waiting_queue, self.tree_cache, eligible=prefetch_eligible
+            )
 
         mamba_allocator = self.token_to_kv_pool_allocator.state_slots
         if mamba_allocator is not None:
@@ -4829,6 +4844,11 @@ class Scheduler(
         if adder.preempt_list:
             for req in adder.preempt_list:
                 self._add_request_to_queue(req)
+
+        if prefetch_window is not None:
+            prefetch_window.update(
+                self.waiting_queue, self.tree_cache, eligible=prefetch_eligible
+            )
 
         # After the re-queue, so #left-in-queue is what the next pass sees.
         self._maybe_log_schedule_decision(

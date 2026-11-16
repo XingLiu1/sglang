@@ -189,6 +189,7 @@ def match_kv_cache(
     cow_mamba: bool = False,
     defer_cow_slot: bool = False,
     max_prefix_len: Optional[int] = None,
+    for_scheduling: bool = False,
 ) -> MatchResult:
     """Match token_ids against tree_cache and adopt the hit as req's prefix."""
     if token_ids is None:
@@ -199,7 +200,14 @@ def match_kv_cache(
             key=_req_radix_key(tree_cache, req, token_ids, max_prefix_len),
             cow_mamba=cow_mamba,
             defer_cow_slot=defer_cow_slot,
-            req=req,
+            # Windowed FlexKV must not acquire Host references for queue tails
+            # or transfer result leases while merely determining queue order.
+            req=(
+                None
+                if for_scheduling
+                and getattr(tree_cache, "defer_host_lookup_until_admission", False)
+                else req
+            ),
         )
     )
     if envs.SGLANG_RADIX_FORCE_MISS.get():
