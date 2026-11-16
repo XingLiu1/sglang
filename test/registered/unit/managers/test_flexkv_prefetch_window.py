@@ -158,18 +158,18 @@ def test_admission_reuses_the_resolved_backend_budget(swa_aware):
         tokens_per_block=4,
         block_bytes=7,
         swa_slot_bytes=11 if swa_aware else 0,
-        byte_limit=128 * 1024**3,
+        byte_limit=(3 if swa_aware else 128) * 1024**3,
     )
     module.resolve_prefetch_budget = Mock(return_value=resolved)
     connector = NS(
         model_config=object(),
-        cache_config=NS(prefetch_max_pinned_bytes=2 * 1024**3),
+        cache_config=NS(prefetch_max_pinned_bytes=128 * 1024**3),
         _swa_kv_pool=object() if swa_aware else None,
     )
     with patch.dict(sys.modules, {"flexkv.prefetch.budget": module}):
         budget = FlexKVPrefetchWindow.from_connector(connector)
-    # An old local config attribute must not resurrect the retired 2 GiB cap.
-    assert budget.capacity_bytes == 128 * 1024**3
+    # The backend has already combined the configured limit and half-pool cap.
+    assert budget.capacity_bytes == (3 if swa_aware else 128) * 1024**3
     module.resolve_prefetch_budget.assert_called_once_with(
         connector.model_config, connector.cache_config, swa_aware=swa_aware
     )

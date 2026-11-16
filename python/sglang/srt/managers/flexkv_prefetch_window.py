@@ -45,8 +45,8 @@ class FlexKVPrefetchWindow:
 
     @classmethod
     def from_connector(cls, connector):
-        # The backend owns both policy and block/SWA geometry. This also avoids
-        # retaining a stale 2 GiB frontend limit from an older config default.
+        # The backend combines the configurable byte ceiling with half the L2
+        # pool minus one block, using the shared block/SWA geometry.
         from flexkv.prefetch.budget import resolve_prefetch_budget
 
         budget = resolve_prefetch_budget(

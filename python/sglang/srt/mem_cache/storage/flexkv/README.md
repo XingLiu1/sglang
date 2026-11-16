@@ -9,19 +9,35 @@ radix insertion, SWA state, and eviction accounting with the inner cache.
 ## Byte budget for a long prefill queue
 
 When FlexKV chunked prefetch is active with `timeout` or `best_effort`, the
-scheduler automatically limits speculative prefetch to **128 GiB** in priority
-order. There is no request-count window or additional CLI setting. Queue entry,
+scheduler limits speculative prefetch by a **128 GiB default byte ceiling** in
+priority order. There is no request-count window or additional SGLang CLI setting. Queue entry,
 including P/D bootstrap, defers I/O until the scheduling pass has sorted the
 queue. `wait_complete` and legacy prefetch keep their existing path.
 
-The effective admission budget is min(128 GiB, actual Full-KV Host pool
-capacity minus one block). Both the backend planner and this adapter reuse
-FlexKV's `resolve_prefetch_budget`, which computes aligned block bytes through
-`block_size_in_bytes_for_cache` and includes registered SWA/state snapshots
-and `all_write` replicas. An older local `prefetch_max_pinned_bytes=2 GiB`
-attribute no longer clips this budget. The paired FlexKV update retires that
-configuration key and `FLEXKV_PREFETCH_MAX_PINNED_BYTES`; old values warn and
-are ignored. There is no additional memory allocation or budget setting.
+`prefetch_max_pinned_bytes` remains the one adjustable byte ceiling, defaulting
+to 137438953472 bytes (128 GiB). The existing environment equivalent is
+`FLEXKV_PREFETCH_MAX_PINNED_BYTES`. An explicit value overrides the default;
+remove or update an old explicit 2 GiB value to use the new default.
+The effective budget is the smaller of this ceiling and **half the actual
+Full-KV L2 pool capacity minus one block**, rounded down to whole blocks:
+
+```text
+min(prefetch_max_pinned_bytes,
+    max(0, floor(actual Full-KV L2 block count / 2) - 1) * physical block bytes)
+```
+
+Both backend planner and adapter use FlexKV's `resolve_prefetch_budget`,
+including compressed block layouts, registered SWA/state and all_write replicas.
+The budget is accounting within the existing pool, without another allocation.
+SGLang's default strategy is `timeout`; a minimal explicit configuration is:
+
+```yaml
+enable_chunked_prefetch: true
+prefetch_options:
+  policy: timeout
+# Optional: the default is already 128 GiB.
+prefetch_max_pinned_bytes: 137438953472
+```
 
 Cooperating TP ranks use the same pool-wide estimate and existing sync-leader
 launch. The backend pool has one authoritative pin/reservation ledger across
@@ -40,7 +56,7 @@ queued requests relinquish only their own speculative lease; FlexKV continues
 to account for canceled I/O until it drains. Its pins and foreground GET ownership
 protect source buffers throughout the lease handoff, even when scheduler credit
 is later reused. The backend ledger also covers tree-node suffixes pinned beyond
-the requested boundary. Leaving a block free is not a guarantee that an arbitrary
+the requested boundary. Reserving half the pool plus one block does not guarantee that an arbitrary
 foreground batch fits; normal allocator backpressure still applies.
 
 Priority probes use GPU prefixes without held Host lookups for the entire queue.
