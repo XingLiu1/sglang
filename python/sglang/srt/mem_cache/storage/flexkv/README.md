@@ -14,22 +14,23 @@ order. There is no request-count window or additional CLI setting. Queue entry,
 including P/D bootstrap, defers I/O until the scheduling pass has sorted the
 queue. `wait_complete` and legacy prefetch keep their existing path.
 
-The effective admission budget is the smaller of 128 GiB, FlexKV's existing
-`prefetch_max_pinned_bytes`, and the Full-KV Host pool capacity minus one block.
-For example, a backend configured with a 2 GiB pinned limit still admits at most
-2 GiB; this change does not silently increase that backend limit or allocate
-another Host pool. Existing session, in-flight-byte, result-TTL and physical
-allocator limits remain authoritative, shared across backend clients. A rejected
-session start is retried on the next scheduling pass.
+The effective admission budget is min(128 GiB, actual Full-KV Host pool
+capacity minus one block). Both the backend planner and this adapter reuse
+FlexKV's `resolve_prefetch_budget`, which computes aligned block bytes through
+`block_size_in_bytes_for_cache` and includes registered SWA/state snapshots
+and `all_write` replicas. An older local `prefetch_max_pinned_bytes=2 GiB`
+attribute no longer clips this budget. The paired FlexKV update retires that
+configuration key and `FLEXKV_PREFETCH_MAX_PINNED_BYTES`; old values warn and
+are ignored. There is no additional memory allocation or budget setting.
 
-At cache initialization, reuse FlexKV's `block_size_in_bytes_for_cache` with
-its resolved pool geometry. The admission estimate is aligned-block count times
-block bytes, plus the registered SWA/state snapshot and `all_write` replicas
-when applicable. It does not round a compressed layout to integer bytes per
-token, or grant an independent quota to each TP rank: cooperating ranks make the
-same admission decisions using pool-wide bytes and launch through the existing
-sync leader. A request larger than the available budget prefetches only a
-block-aligned prefix. The entire prefix hash chain is retained.
+Cooperating TP ranks use the same pool-wide estimate and existing sync-leader
+launch. The backend pool has one authoritative pin/reservation ledger across
+its clients. A request larger than available credit prefetches only an aligned
+prefix, preserving the full prefix hash chain. Existing session, in-flight-byte,
+result-TTL and physical allocator limits remain in effect. The in-flight staging
+limit controls one transfer window, not cumulative completed KV residency;
+completed blocks transfer to pinned credit and subsequent windows can refill.
+A rejected session start is retried on the next scheduling pass.
 
 The scheduler conservatively charges shared/local prefixes once per request;
 this is a lookahead estimate, not unique physical-block accounting. Completed
@@ -53,6 +54,9 @@ LoRA and token budgets continue to determine admission. Cache-aware ordering and
 pre-admission prefix snapshots omit Host hits in this mode. CPU/controlled-endpoint
 tests cover these contracts; GPU/RDMA, output accuracy, TTFT and throughput A/B
 validation remain separate.
+
+The automatic byte budget requires the paired [FlexKV backend update](https://github.com/taco-project/FlexKV/pull/338).
+Deploy both source revisions together and restart any external FlexKV server.
 
 ## Setup
 

@@ -8,7 +8,6 @@ from unittest.mock import Mock, call, patch
 import pytest
 
 from sglang.srt.managers.flexkv_prefetch_window import (
-    PREFETCH_BYTE_BUDGET,
     FlexKVPrefetchWindow,
 )
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -152,41 +151,30 @@ def test_invalid_geometry(blocks, nbytes, swa):
         FlexKVPrefetchWindow(blocks, nbytes, capacity_bytes=100, swa_slot_bytes=swa)
 
 
-@pytest.mark.parametrize("replicated", [False, True])
-def test_pool_geometry_uses_backend_block_bytes_and_registered_swa(replicated):
-    # Isolate the optional FlexKV import; this tests pool-wide billing rather
-    # than constructing serving processes or pretending to exercise DMA.
-    config = ModuleType("flexkv.common.config")
-    config.GLOBAL_CONFIG_FROM_ENV = NS(
-        kv_shared_across_ranks_mode="all_write" if replicated else "sharded"
+@pytest.mark.parametrize("swa_aware", [False, True])
+def test_admission_reuses_the_resolved_backend_budget(swa_aware):
+    module = ModuleType("flexkv.prefetch.budget")
+    resolved = NS(
+        tokens_per_block=4,
+        block_bytes=7,
+        swa_slot_bytes=11 if swa_aware else 0,
+        byte_limit=128 * 1024**3,
     )
-    config.RankInfo = lambda model: NS(model=model)
-    # Seven bytes per compressed block deliberately cannot be represented as
-    # an integral per-token cost with four tokens per block.
-    config.block_size_in_bytes_for_cache = lambda model, cache, rank: 7
+    module.resolve_prefetch_budget = Mock(return_value=resolved)
     connector = NS(
-        model_config=NS(num_kv_heads=1, effective_tp_size_per_node=4),
-        cache_config=NS(
-            tokens_per_block=4,
-            num_cpu_blocks=100,
-            prefetch_max_pinned_bytes=1000,
-            swa=NS(enabled=True, multi_group=True, snapshot_bytes=11),
-        ),
-        _swa_kv_pool=object(),
+        model_config=object(),
+        cache_config=NS(prefetch_max_pinned_bytes=2 * 1024**3),
+        _swa_kv_pool=object() if swa_aware else None,
     )
-    with patch.dict(sys.modules, {"flexkv.common.config": config}):
+    with patch.dict(sys.modules, {"flexkv.prefetch.budget": module}):
         budget = FlexKVPrefetchWindow.from_connector(connector)
-    replicas = 4 if replicated else 1
-    assert budget.block_bytes == 7 * replicas
-    assert budget.swa_slot_bytes == 11 * replicas
-    assert budget.capacity_bytes == min(1000, 99 * 7 * replicas)
+    # An old local config attribute must not resurrect the retired 2 GiB cap.
+    assert budget.capacity_bytes == 128 * 1024**3
+    module.resolve_prefetch_budget.assert_called_once_with(
+        connector.model_config, connector.cache_config, swa_aware=swa_aware
+    )
     budget.update(requests(1, tokens=4), cache())
-    assert budget.reserved_bytes == 18 * replicas
-
-
-def test_128_gib_ceiling_and_smaller_backend_capacity():
-    assert window(PREFETCH_BYTE_BUDGET * 2).capacity_bytes == 128 * 1024**3
-    assert window(99).capacity_bytes == 99
+    assert budget.reserved_bytes == 7 + (11 if swa_aware else 0)
 
 
 def test_retraction_of_mutated_request_cancels_only_its_old_attempt():

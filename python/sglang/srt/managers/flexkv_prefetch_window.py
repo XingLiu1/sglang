@@ -11,9 +11,6 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.base_prefix_cache import CacheRequestHandle
 
 
-PREFETCH_BYTE_BUDGET = 128 * 1024**3
-
-
 @dataclass(frozen=True, eq=False)
 class _Reservation:
     req: Req
@@ -43,52 +40,25 @@ class FlexKVPrefetchWindow:
         self.tokens_per_block = tokens_per_block
         self.block_bytes = block_bytes
         self.swa_slot_bytes = swa_slot_bytes
-        self.capacity_bytes = max(0, min(PREFETCH_BYTE_BUDGET, capacity_bytes))
+        self.capacity_bytes = max(0, capacity_bytes)
         self._requests: dict[CacheRequestHandle, _Reservation] = {}
 
     @classmethod
     def from_connector(cls, connector):
-        # Use the backend's pool geometry, including block-level compression.
-        # Dividing a compressed block into rounded integer bytes/token loses KV.
-        from flexkv.common.config import (
-            GLOBAL_CONFIG_FROM_ENV,
-            RankInfo,
-            block_size_in_bytes_for_cache,
-        )
+        # The backend owns both policy and block/SWA geometry. This also avoids
+        # retaining a stale 2 GiB frontend limit from an older config default.
+        from flexkv.prefetch.budget import resolve_prefetch_budget
 
-        model, cache = connector.model_config, connector.cache_config
-        replicas = 1
-        if (
-            model.num_kv_heads == 1
-            and GLOBAL_CONFIG_FROM_ENV.kv_shared_across_ranks_mode == "all_write"
-        ):
-            replicas = model.effective_tp_size_per_node
-        block_bytes = replicas * block_size_in_bytes_for_cache(
-            model, cache, RankInfo(model)
-        )
-        swa_bytes = 0
-        swa = cache.swa
-        if swa is not None and swa.enabled and connector._swa_kv_pool is not None:
-            if swa.multi_group and swa.snapshot_bytes is None:
-                raise ValueError("SWA prefetch requires registered snapshot geometry")
-            swa_bytes = replicas * (
-                swa.snapshot_bytes
-                or swa.num_swa_layers
-                * cache.tokens_per_block
-                * swa.bytes_per_token_per_layer
-            )
-        # A smaller backend limit still wins. Leave a Full-KV block available
-        # for foreground work; the backend remains the authoritative ledger
-        # across clients, canceled DMA, tree-node pins and H2D ownership.
-        capacity = min(
-            cache.prefetch_max_pinned_bytes,
-            max(0, cache.num_cpu_blocks - 1) * block_bytes,
+        budget = resolve_prefetch_budget(
+            connector.model_config,
+            connector.cache_config,
+            swa_aware=connector._swa_kv_pool is not None,
         )
         return cls(
-            cache.tokens_per_block,
-            block_bytes,
-            capacity_bytes=capacity,
-            swa_slot_bytes=swa_bytes,
+            budget.tokens_per_block,
+            budget.block_bytes,
+            capacity_bytes=budget.byte_limit,
+            swa_slot_bytes=budget.swa_slot_bytes,
         )
 
     @property
